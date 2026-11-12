@@ -2,7 +2,7 @@ import { DateTime } from 'luxon';
 import { CallAssignment, WorkEvent } from '../../models/work.js';
 import { Venue } from '../../models/registry.js';
 import { getSettings, type SettingsDoc } from '../settings/settings.service.js';
-import { addDaysIso, zonedDateTime, todayIso, formatDateFr } from '../../lib/dates.js';
+import { addDaysIso, zonedDateTime, todayIso, formatDateFr, formatWeekFr, weekBounds } from '../../lib/dates.js';
 import { autoAssign, regenerateMessage } from '../call-assignments/call-assignments.service.js';
 import { scheduleJob, cancelJobs } from '../notifications/notifications.service.js';
 
@@ -11,8 +11,14 @@ export function computeDueDates(
   eventDate: string,
   s: Pick<SettingsDoc, 'timezone' | 'preCallDaysBefore' | 'preCallTime' | 'postCallMode' | 'postCallNextMorningTime' | 'postCallSameEveningTime'>,
   postOverride?: 'next_morning' | 'same_evening' | null,
+  week?: { plannedDay: string | null } | null,
 ) {
   const pre = zonedDateTime(addDaysIso(eventDate, -s.preCallDaysBefore), s.preCallTime, s.timezone);
+  // Semaine : suivi le soir du jour donné par le responsable, sinon le dimanche soir de la semaine
+  if (week) {
+    const day = week.plannedDay ?? weekBounds(eventDate).end;
+    return { pre, post: zonedDateTime(day, s.postCallSameEveningTime, s.timezone) };
+  }
   const mode = postOverride ?? s.postCallMode;
   const post =
     mode === 'same_evening'
@@ -34,7 +40,9 @@ export async function syncEventSchedule(eventId: string): Promise<void> {
   if (event.status === 'cancelled') return cancelEventSchedule(eventId);
 
   const venue = await Venue.findById(event.venueId).lean();
-  const due = computeDueDates(event.date, s, event.postCallTimingOverride as 'next_morning' | 'same_evening' | null);
+  const weekly = Boolean(venue?.weeklySchedule);
+  const due = computeDueDates(event.date, s, event.postCallTimingOverride as 'next_morning' | 'same_evening' | null, weekly ? { plannedDay: event.plannedDay ?? null } : null);
+  const when = weekly ? (event.plannedDay ? formatDateFr(event.plannedDay) : formatWeekFr(event.date)) : formatDateFr(event.date);
   const today = todayIso(s.timezone);
   const now = new Date();
 
@@ -94,8 +102,8 @@ export async function syncEventSchedule(eventId: string): Promise<void> {
         title: type === 'pre' ? 'Appel à préparer' : 'Appel de suivi à organiser',
         body:
           type === 'pre'
-            ? `Travaux de maintenance dans la Salle du Royaume de ${salle}${who} dans ${s.preCallDaysBefore} jours (${formatDateFr(event.date)}). Ouvre l'application pour transmettre la mission au volontaire.`
-            : `Travaux du ${formatDateFr(event.date)} à ${salle}${who} : organise l'appel de suivi auprès du responsable.`,
+            ? `Travaux de maintenance dans la Salle du Royaume de ${salle}${who} (${when}). Ouvre l'application pour transmettre la mission au volontaire.`
+            : `Travaux (${when}) à ${salle}${who} : relance le volontaire pour l'appel de suivi.`,
         url: `/missions/${a._id}`,
         workEventId: event._id,
         callAssignmentId: a._id,

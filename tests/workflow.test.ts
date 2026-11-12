@@ -531,6 +531,21 @@ describe('Parcours complet', () => {
     expect((await request(app).get('/api/public/branding').expect(200)).body.loginBackground).toBeNull();
   });
 
+  it('n’enregistre jamais un envoi arrêté, même s’il était déjà arrivé', async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+    const vid = (await request(app).get('/api/venues').set(auth()).expect(200)).body[0]._id;
+    const before = (await request(app).get(`/api/venues/${vid}`).set(auth())).body.imageUrl;
+    // Arrêt juste après l’arrivée : l’image précédente revient
+    await request(app).post(`/api/uploads/images/venues/${vid}`).set(auth()).set('X-Upload-Id', 'test-upload-0001').attach('file', png, 'a.png').expect(200);
+    const r = await request(app).post('/api/uploads/cancel/test-upload-0001').set(auth()).expect(200);
+    expect(r.body.undone).toBe(true);
+    expect((await request(app).get(`/api/venues/${vid}`).set(auth())).body.imageUrl).toBe(before);
+    // Arrêt avant la fin : refusé, rien n’est enregistré
+    await request(app).post('/api/uploads/cancel/test-upload-0002').set(auth()).expect(200);
+    await request(app).post(`/api/uploads/images/venues/${vid}`).set(auth()).set('X-Upload-Id', 'test-upload-0002').attach('file', png, 'b.png').expect(499);
+    expect((await request(app).get(`/api/venues/${vid}`).set(auth())).body.imageUrl).toBe(before);
+  });
+
   it('garde la connexion par empreinte après la déconnexion, et la retire au changement de mot de passe', async () => {
     const key = await request(app).post('/api/auth/biometric/enroll').set(auth()).send({ device: 'test' }).expect(201);
     await request(app).post('/api/auth/logout').send({}).expect(204);
@@ -585,6 +600,32 @@ describe('Parcours complet', () => {
     await request(app).delete(`/api/volunteers/${created.body._id}`).set(auth()).expect(200);
     const left = await mods.models.CallAssignment.find({ volunteerId: created.body._id, status: { $in: ['planned', 'notified'] }, dueAt: { $gte: new Date() } }).lean();
     expect(left).toHaveLength(0);
+  });
+
+  it('gère les programmes « semaine du » : jour demandé, suivi le dimanche soir ou le soir du jour donné', async () => {
+    const e = await mods.models.WorkEvent.findOne({ status: 'scheduled', date: { $gte: new Date().toISOString().slice(0, 10) } }).sort({ date: 1 }).lean();
+    await request(app).patch(`/api/venues/${e!.venueId}`).set(auth()).send({ weeklySchedule: true }).expect(200);
+    const { weekBounds } = await import('../src/lib/dates.js');
+    const { end } = weekBounds(e!.date);
+    let post = await mods.models.CallAssignment.findOne({ workEventId: e!._id, type: 'post' }).lean();
+    const pre = await mods.models.CallAssignment.findOne({ workEventId: e!._id, type: 'pre' }).lean();
+    // Dimanche de la semaine, 19 h à Douala (UTC+1)
+    expect(post!.dueAt.toISOString()).toBe(`${end}T18:00:00.000Z`);
+    if (['planned', 'notified'].includes(pre!.status)) {
+      expect(pre!.message!.text).toContain('semaine du');
+      expect(pre!.message!.text).toContain('quel jour');
+      expect(pre!.message!.text).toContain('nettoyage hebdomadaire');
+    }
+    // Jour donné : suivi le soir même ; report possible dans la semaine seulement
+    const { addDaysIso } = await import('../src/lib/dates.js');
+    const day = addDaysIso(e!.date, 2);
+    await request(app).patch(`/api/work-events/${e!._id}/planned-day`).set(auth()).send({ plannedDay: day }).expect(200);
+    post = await mods.models.CallAssignment.findOne({ workEventId: e!._id, type: 'post' }).lean();
+    expect(post!.dueAt.toISOString()).toBe(`${day}T18:00:00.000Z`);
+    await request(app).patch(`/api/work-events/${e!._id}/planned-day`).set(auth()).send({ plannedDay: addDaysIso(end, 1) }).expect(400);
+    // Retour à l’état initial
+    await request(app).patch(`/api/work-events/${e!._id}/planned-day`).set(auth()).send({ plannedDay: null }).expect(200);
+    await request(app).patch(`/api/venues/${e!.venueId}`).set(auth()).send({ weeklySchedule: false }).expect(200);
   });
 
   it('expose un tableau de bord cohérent', async () => {

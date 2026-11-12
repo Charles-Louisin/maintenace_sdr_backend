@@ -16,13 +16,12 @@ export const IMAGE_MAX_BYTES = 6 * 1024 * 1024;
 const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 /** Vérifie le type réel (pas l'extension) puis stocke l'image. */
-export async function storeImage(file: Express.Multer.File | undefined, previous?: Partial<StoredImage> | null): Promise<StoredImage> {
+export async function storeImage(file: Express.Multer.File | undefined): Promise<StoredImage> {
   if (!file) throw badRequest('Aucune image reçue');
   if (file.size > IMAGE_MAX_BYTES) throw badRequest('Image trop lourde (6 Mo maximum)');
   const ft = await fileTypeFromBuffer(file.buffer);
   if (!ft || !ALLOWED.has(ft.mime)) throw badRequest('Format accepté : JPEG, PNG ou WebP');
   const stored = await putFile(file.buffer, `image.${ft.ext}`, ft.mime);
-  if (previous?.key) await deleteFile(previous).catch(() => undefined);
   return { driver: stored.driver, key: stored.key, mime: ft.mime, v: Date.now() };
 }
 

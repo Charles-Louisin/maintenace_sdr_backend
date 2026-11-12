@@ -33,6 +33,8 @@ const workEventSchema = new Schema(
     },
     /** Choix du rappel après travaux pour cette intervention (sinon paramètre global) */
     postCallTimingOverride: { type: String, enum: ['next_morning', 'same_evening', null], default: null },
+    /** Salle « à la semaine » : jour des travaux donné par le responsable (dans la semaine), sinon null */
+    plannedDay: { type: String, default: null },
     sources: {
       type: [
         {

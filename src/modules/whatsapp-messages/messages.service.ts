@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon';
-import { formatDateFr } from '../../lib/dates.js';
+import { formatDateFr, formatWeekFr, weekBounds } from '../../lib/dates.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
 
 /** Données nécessaires à la génération d'un message (toutes issues d'informations validées). */
@@ -21,6 +21,8 @@ export interface MessageContext {
     catalog?: { steps?: string[]; materials?: string[]; ppe?: string[]; products?: string[]; description?: string } | null;
   }[];
   questions: string[];
+  /** Salle « à la semaine » : jour connu (plannedDay) ou seulement la semaine */
+  week?: { plannedDay: string | null } | null;
 }
 
 const MISSING = '[À COMPLÉTER]';
@@ -77,6 +79,21 @@ export function renderInstructions(ctx: MessageContext): string {
   return lines.join('\n') + '\n';
 }
 
+/** Consignes propres aux programmes « semaine du » (appel préalable). */
+export function renderWeekNotes(ctx: MessageContext): string {
+  if (!ctx.week || ctx.type !== 'pre') return '';
+  const lines = [''];
+  if (!ctx.week.plannedDay) {
+    lines.push(
+      `Les travaux sont prévus pour la ${formatWeekFr(ctx.eventDate)}, sans jour précis : merci de lui demander quel jour ils seront faits et de me l’indiquer.`,
+    );
+  } else {
+    lines.push(`Les travaux sont prévus le ${formatDateFr(ctx.week.plannedDay)}.`);
+  }
+  lines.push('Rappelle-lui aussi de faire le nettoyage hebdomadaire de la salle.');
+  return lines.join('\n') + '\n';
+}
+
 export function renderQuestions(questions: string[]): string {
   if (!questions.length) return MISSING;
   return questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
@@ -84,12 +101,24 @@ export function renderQuestions(questions: string[]): string {
 
 /** Remplace les variables du modèle. Une information absente est signalée par [À COMPLÉTER], jamais inventée. */
 export function renderMessage(template: string, ctx: MessageContext): string {
+  const weekOnly = Boolean(ctx.week && !ctx.week.plannedDay);
+  const day = ctx.week?.plannedDay ?? ctx.eventDate;
+  const weekNotes = renderWeekNotes(ctx);
+  // « le {date} » n'a pas de sens pour une semaine : on écrit « la semaine du … »
+  let tpl = weekOnly ? template.replace(/\ble \{date\}/g, '{date}') : template;
+  // Anciens modèles sans {consignes_semaine} : les consignes sont ajoutées avant le dernier paragraphe
+  if (weekNotes && !tpl.includes('{consignes_semaine}')) {
+    const parts = tpl.split(/\n\n(?=[^\n]*$)/);
+    tpl = parts.length === 2 ? `${parts[0]}\n{consignes_semaine}\n${parts[1]}` : `${tpl}\n{consignes_semaine}`;
+  }
+  const inWeek = ctx.week ? ctx.callDate >= weekBounds(ctx.eventDate).start && ctx.callDate <= weekBounds(ctx.eventDate).end : false;
   const vars: Record<string, string> = {
     volontaire: ctx.volunteerName || MISSING,
     salle: ctx.venueName || MISSING,
     assemblee: ctx.congregationName || 'toutes les assemblées',
-    date: formatDateFr(ctx.eventDate),
-    date_relative: relativeDay(ctx.eventDate, ctx.callDate),
+    date: weekOnly ? `la ${formatWeekFr(ctx.eventDate)}` : formatDateFr(day),
+    date_relative: weekOnly ? (inWeek ? 'cette semaine' : 'la semaine passée') : relativeDay(day, ctx.callDate),
+    consignes_semaine: weekNotes,
     responsable: ctx.responsibleName || MISSING,
     telephone_responsable: ctx.responsiblePhone ? `${formatPhoneDisplay(ctx.responsiblePhone)}${ctx.responsibleWhatsapp ? ' (WhatsApp)' : ''}` : MISSING,
     travaux: renderWorks(ctx),
@@ -97,7 +126,7 @@ export function renderMessage(template: string, ctx: MessageContext): string {
     consignes: renderInstructions(ctx),
     questions: renderQuestions(ctx.questions),
   };
-  return template
+  return tpl
     .replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] : m))
     .replace(/\n{3,}/g, '\n\n')
     .trim();

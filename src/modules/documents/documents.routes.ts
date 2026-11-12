@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { ah, param, parse } from '../../lib/http.js';
 import { ImportBatch, SourceDocument, ExtractionResult } from '../../models/documents.js';
 import { detectFormat, sha256, safeFileName, MAX_FILE_BYTES } from './file-validation.js';
-import { putFile, signDownload } from './storage.service.js';
+import { deleteFile, putFile, signDownload } from './storage.service.js';
+import { commitOrUndo, uploadIdOf } from '../uploads/upload-control.js';
 import { badRequest, notFound } from '../../lib/errors.js';
 import { audit } from '../audit/audit.service.js';
 
@@ -62,6 +63,13 @@ documentsRouter.post(
       await ImportBatch.deleteOne({ _id: batch._id });
       return res.status(duplicates.length ? 409 : 400).json({ batchId: null, accepted, duplicates, rejected });
     }
+    // Envoi arrêté par l'utilisateur : rien n'est conservé
+    await commitOrUndo(uploadIdOf(req), async () => {
+      const docs = await SourceDocument.find({ _id: { $in: batch.documentIds } });
+      for (const d of docs) await deleteFile(d.storage as { driver?: string; key?: string }).catch(() => undefined);
+      await SourceDocument.deleteMany({ _id: { $in: batch.documentIds } });
+      await ImportBatch.deleteOne({ _id: batch._id });
+    });
     batch.status = analyzeNow ? 'queued' : 'uploaded';
     await batch.save();
     await audit('upload', 'import_batch', batch._id, { files: accepted.length, duplicates: duplicates.length });

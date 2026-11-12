@@ -19,6 +19,8 @@ const venueSchema = new Schema(
     notes: { type: String, default: '' },
     congregations: { type: [congregationSchema], default: [] },
     archived: { type: Boolean, default: false },
+    /** Programmes donnés « semaine du » : le jour exact est demandé au responsable */
+    weeklySchedule: { type: Boolean, default: false },
     /** Photo de la salle (fond des cartes, vignettes) */
     image: { type: new Schema({ driver: String, key: String, mime: String, v: Number }, { _id: false }), default: null },
   },

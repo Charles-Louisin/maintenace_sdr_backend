@@ -5,13 +5,14 @@ import { ah, parse, param } from '../../lib/http.js';
 import { ReportTemplate, MonthlyReport } from '../../models/config.js';
 import { SourceDocument } from '../../models/documents.js';
 import { detectFormat, sha256, safeFileName, MAX_FILE_BYTES } from '../documents/file-validation.js';
-import { putFile, getFile, signDownload } from '../documents/storage.service.js';
+import { deleteFile, putFile, getFile, signDownload } from '../documents/storage.service.js';
 import { analyzeDocx } from './docx.engine.js';
 import { previewMonth, generateMonthly } from './monthly-reports.service.js';
 import { DEFAULT_REPORT_COLUMNS, REPORT_FIELDS } from '../settings/defaults.js';
 import { badRequest, notFound } from '../../lib/errors.js';
 import { normKey } from '../../lib/text.js';
 import { audit } from '../audit/audit.service.js';
+import { commitOrUndo, uploadIdOf } from '../uploads/upload-control.js';
 
 export const reportTemplatesRouter = Router();
 export const monthlyReportsRouter = Router();
@@ -65,11 +66,20 @@ reportTemplatesRouter.post(
     if (format !== 'docx') throw badRequest('Le modèle de rapport doit être un document Word (.docx)');
     const hash = sha256(f.buffer);
     let doc = await SourceDocument.findOne({ sha256: hash });
+    const created = !doc;
     if (!doc) {
       const stored = await putFile(f.buffer, name, mimeType);
       doc = await SourceDocument.create({ originalName: name, mimeType, format, size: f.size, sha256: hash, storage: stored, kind: 'report_template', status: 'analyzed' });
     }
     const t = await createTemplateFromDoc(String(doc._id), name.replace(/\.docx$/i, ''));
+    const docRef = doc;
+    await commitOrUndo(uploadIdOf(req), async () => {
+      await ReportTemplate.deleteOne({ _id: t._id });
+      if (created) {
+        await deleteFile(docRef.storage as { driver?: string; key?: string }).catch(() => undefined);
+        await SourceDocument.deleteOne({ _id: docRef._id });
+      }
+    });
     await audit('upload', 'report_template', t._id);
     res.status(201).json(t);
   }),

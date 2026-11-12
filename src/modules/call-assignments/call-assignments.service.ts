@@ -111,6 +111,7 @@ async function buildMessageData(a: AssignmentDoc): Promise<{ ctx: MessageContext
       };
     }),
     questions: questions.map((q) => q.label),
+    week: venue?.weeklySchedule ? { plannedDay: (event as { plannedDay?: string | null }).plannedDay ?? null } : null,
   };
   return { ctx, questions };
 }

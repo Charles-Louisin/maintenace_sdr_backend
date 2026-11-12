@@ -9,6 +9,8 @@ import { normKey } from '../../lib/text.js';
 import { notFound, conflict, badRequest } from '../../lib/errors.js';
 import { audit } from '../audit/audit.service.js';
 import { signImage } from '../images/images.service.js';
+import { syncEventSchedule } from '../scheduling/scheduling.service.js';
+import { addDaysIso, todayIso } from '../../lib/dates.js';
 
 export const venuesRouter = Router();
 
@@ -26,6 +28,8 @@ const venueInput = z.object({
   notes: z.string().max(4000).optional(),
   congregations: z.array(congregationInput).max(20).optional(),
   archived: z.boolean().optional(),
+  /** Programmes « semaine du » */
+  weeklySchedule: z.boolean().optional(),
 });
 
 venuesRouter.get(
@@ -94,6 +98,7 @@ venuesRouter.patch(
       }
     }
     const nameChanged = Boolean(body.name && body.name !== v.name);
+    const weeklyChanged = body.weeklySchedule !== undefined && body.weeklySchedule !== Boolean(v.weeklySchedule);
     v.set(body);
     await v.save();
 
@@ -115,6 +120,11 @@ venuesRouter.patch(
         await regenerateMessage(a, { keepEdited: true });
         await a.save();
       }
+    }
+    // Mode semaine activé ou retiré : échéances de suivi et messages recalculés pour les interventions à venir
+    if (weeklyChanged) {
+      const recent = await WorkEvent.find({ venueId: v._id, status: 'scheduled', date: { $gte: addDaysIso(todayIso('UTC'), -7) } }).select('_id').lean();
+      for (const e of recent) await syncEventSchedule(String(e._id));
     }
     await audit('update', 'venue', v._id, body);
     res.json(v);

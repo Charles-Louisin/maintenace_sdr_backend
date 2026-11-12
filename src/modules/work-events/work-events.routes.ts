@@ -5,6 +5,7 @@ import { WorkEvent, CallAssignment, IncomingReport } from '../../models/work.js'
 import { Venue, ResponsibleContact } from '../../models/registry.js';
 import { SourceDocument } from '../../models/documents.js';
 import { notFound, badRequest, conflict } from '../../lib/errors.js';
+import { weekBounds } from '../../lib/dates.js';
 import { ALL_CONGREGATIONS } from '../venues/congregation-migration.js';
 import { normKey } from '../../lib/text.js';
 import { eventDedupKey } from '../extraction/normalize.js';
@@ -161,10 +162,41 @@ workEventsRouter.patch(
     }
     const { tasks: _t, ...rest } = body;
     e.set(rest);
+    // Nouvelle semaine : l’ancien jour prévu ne s’applique plus
+    if (body.date && e.plannedDay) {
+      const { start, end } = weekBounds(e.date);
+      if (e.plannedDay < start || e.plannedDay > end) e.plannedDay = null;
+    }
     e.history.push({ at: new Date(), action: before.date !== e.date ? 'date_changed' : 'updated', details: { before } });
     await e.save();
     await syncEventSchedule(String(e._id));
     await audit('update', 'work_event', e._id, { fields: Object.keys(body) });
+    res.json(e);
+  }),
+);
+
+/**
+ * Salle « à la semaine » : jour des travaux donné par le responsable (ou reporté).
+ * Toujours DANS la semaine prévue ; null = pas encore connu (suivi le dimanche soir).
+ */
+workEventsRouter.patch(
+  '/:id/planned-day',
+  ah(async (req, res) => {
+    const { plannedDay } = parse(z.object({ plannedDay: isoDate.nullable() }), req.body);
+    const e = await WorkEvent.findById(param(req, 'id'));
+    if (!e) throw notFound('Intervention');
+    const venue = await Venue.findById(e.venueId).select('weeklySchedule').lean();
+    if (!venue?.weeklySchedule) throw badRequest('Cette salle n’a pas de programme à la semaine');
+    if (plannedDay) {
+      const { start, end } = weekBounds(e.date);
+      if (plannedDay < start || plannedDay > end) throw badRequest('Le jour doit rester dans la semaine prévue');
+    }
+    const before = e.plannedDay ?? null;
+    e.plannedDay = plannedDay;
+    e.history.push({ at: new Date(), action: before ? 'planned_day_moved' : 'planned_day_set', details: { from: before, to: plannedDay } });
+    await e.save();
+    await syncEventSchedule(String(e._id));
+    await audit('update', 'work_event', e._id, { plannedDay });
     res.json(e);
   }),
 );

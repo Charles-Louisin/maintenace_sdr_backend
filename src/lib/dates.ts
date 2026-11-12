@@ -25,6 +25,24 @@ export function formatDateFr(isoDate: string, withWeekday = true): string {
   return dt.toFormat(withWeekday ? 'cccc d LLLL yyyy' : 'd LLLL yyyy');
 }
 
+/**
+ * Programme « semaine du X » : la semaine commence le jour indiqué et se termine le dimanche suivant
+ * (X lundi → dimanche X+6 ; X dimanche → dimanche suivant).
+ */
+export function weekBounds(isoDate: string): { start: string; end: string } {
+  const d = DateTime.fromISO(isoDate, { zone: 'utc' });
+  const toSunday = (7 - d.weekday) % 7 || 7;
+  return { start: isoDate, end: d.weekday === 7 ? d.plus({ days: 7 }).toISODate()! : d.plus({ days: toSunday }).toISODate()! };
+}
+
+/** « semaine du lundi 9 au dimanche 15 novembre 2026 » */
+export function formatWeekFr(isoDate: string): string {
+  const { start, end } = weekBounds(isoDate);
+  const s = DateTime.fromISO(start).setLocale('fr');
+  const e = DateTime.fromISO(end).setLocale('fr');
+  return `semaine du ${s.toFormat('cccc d')}${s.month !== e.month ? s.toFormat(' LLLL') : ''} au ${e.toFormat('cccc d LLLL yyyy')}`;
+}
+
 export function formatShortFr(isoDate: string): string {
   return DateTime.fromISO(isoDate).toFormat('dd/LL/yyyy');
 }

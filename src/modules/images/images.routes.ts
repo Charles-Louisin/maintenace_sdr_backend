@@ -1,4 +1,4 @@
-import { Router, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import { Types } from 'mongoose';
 import { ah, param, qstr } from '../../lib/http.js';
@@ -10,6 +10,24 @@ import { getFile } from '../documents/storage.service.js';
 import { getSettings, invalidateSettings } from '../settings/settings.service.js';
 import { IMAGE_MAX_BYTES, removeImage, signImage, storeImage, verifyImage, type StoredImage } from './images.service.js';
 import { audit } from '../audit/audit.service.js';
+import { commitOrUndo, uploadIdOf } from '../uploads/upload-control.js';
+
+/**
+ * Remplacement d'une image, annulable : l'ancienne est gardée quelques minutes.
+ * Si l'envoi est arrêté (avant ou juste après), l'ancienne image revient et la nouvelle est supprimée.
+ */
+async function replaceImage(req: Request, setImg: (img: StoredImage | null) => Promise<void>, previous: StoredImage | null) {
+  const img = await storeImage(req.file);
+  await setImg(img);
+  let undone = false;
+  await commitOrUndo(uploadIdOf(req), async () => {
+    undone = true;
+    await setImg(previous);
+    await removeImage(img);
+  });
+  if (previous?.key) setTimeout(() => !undone && void removeImage(previous), 10 * 60 * 1000).unref?.();
+  return img;
+}
 
 export const uploadImage = multer({ storage: multer.memoryStorage(), limits: { fileSize: IMAGE_MAX_BYTES, files: 1, fields: 2 } }).single('file');
 
@@ -67,9 +85,8 @@ imageUploadRouter.post(
   ah(async (req, res) => {
     const v = await Venue.findById(param(req, 'id'));
     if (!v) throw notFound('Salle');
-    const img = await storeImage(req.file, v.get('image') as StoredImage | null);
-    v.set('image', img);
-    await v.save();
+    const id = String(v._id);
+    const img = await replaceImage(req, async (x) => void (await Venue.updateOne({ _id: id }, { image: x })), (v.get('image') as StoredImage | null) ?? null);
     await audit('update', 'venue', v._id, { image: true });
     res.json({ imageUrl: signImage('venue', String(v._id), img) });
   }),
@@ -92,9 +109,7 @@ imageUploadRouter.post(
   ah(async (req, res) => {
     const o = await OwnerAccount.findById(req.ownerId);
     if (!o) throw notFound('Compte');
-    const img = await storeImage(req.file, o.get('avatar') as StoredImage | null);
-    o.set('avatar', img);
-    await o.save();
+    const img = await replaceImage(req, async (x) => void (await OwnerAccount.updateOne({ _id: o._id }, { avatar: x })), (o.get('avatar') as StoredImage | null) ?? null);
     res.json({ avatarUrl: signImage('avatar', String(o._id), img) });
   }),
 );
@@ -116,10 +131,14 @@ imageUploadRouter.post(
   ah(async (req, res) => {
     const s = await Settings.findOne({ singleton: 'settings' });
     if (!s) throw notFound('Paramètres');
-    const img = await storeImage(req.file, s.get('branding.loginBackground') as StoredImage | null);
-    s.set('branding.loginBackground', img);
-    await s.save();
-    invalidateSettings();
+    const img = await replaceImage(
+      req,
+      async (x) => {
+        await Settings.updateOne({ _id: s._id }, { 'branding.loginBackground': x });
+        invalidateSettings();
+      },
+      (s.get('branding.loginBackground') as StoredImage | null) ?? null,
+    );
     res.json({ loginBackground: `/api/public/login-background?v=${img.v}` });
   }),
 );
