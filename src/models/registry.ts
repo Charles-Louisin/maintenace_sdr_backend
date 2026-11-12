@@ -31,6 +31,8 @@ const contactSchema = new Schema(
     fullName: { type: String, required: true, trim: true },
     nameKey: { type: String, required: true, index: true },
     phones: { type: [String], default: [] }, // format international sans "+"
+    /** Numéros (parmi phones) joignables sur WhatsApp, un choix par numéro */
+    whatsappPhones: { type: [String], default: [] },
     role: { type: String, default: 'Coordinateur de nettoyage' },
     venueIds: { type: [Schema.Types.ObjectId], ref: 'Venue', default: [] },
     congregationIds: { type: [Schema.Types.ObjectId], default: [] },

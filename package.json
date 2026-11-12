@@ -56,5 +56,8 @@
     "esbuild@0.28.2": true,
     "mongodb-memory-server@11.3.0": true,
     "msgpackr-extract@3.0.7": true
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

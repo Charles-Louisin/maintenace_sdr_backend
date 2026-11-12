@@ -3,12 +3,14 @@ import { z } from 'zod';
 import { Types } from 'mongoose';
 import { ah, parse, param, objectId, qstr } from '../../lib/http.js';
 import { CallAssignment, WorkEvent } from '../../models/work.js';
+import { NotificationJob } from '../../models/system.js';
 import { Volunteer, ResponsibleContact } from '../../models/registry.js';
 import { notFound, badRequest } from '../../lib/errors.js';
 import { whatsappLink, formatPhoneDisplay } from '../../lib/phone.js';
 import { autoAssign, regenerateMessage, computeRanking } from './call-assignments.service.js';
 import { cancelJobs } from '../notifications/notifications.service.js';
 import { audit } from '../audit/audit.service.js';
+import { ensureOverdueReminders } from '../notifications/overdue.service.js';
 
 export const callAssignmentsRouter = Router();
 
@@ -23,13 +25,19 @@ callAssignmentsRouter.get(
     if (scope === 'todo') {
       filter.status = { $in: ['planned', 'notified'] };
       filter.dueAt = { $lte: new Date(Date.now() + 7 * 86400000) };
-    } else if (scope === 'awaiting_response') filter.status = 'message_sent';
+    } else if (scope === 'awaiting_response') filter.status = { $in: ['message_sent', 'response_received'] };
     else if (scope === 'upcoming') {
       filter.status = { $in: ['planned', 'notified'] };
       filter.dueAt = { $gt: new Date() };
-    } else if (scope === 'done') filter.status = { $in: ['response_received', 'completed'] };
+    } else if (scope === 'done') filter.status = 'completed';
+    else if (scope === 'overdue') {
+      // Échéance passée et pas encore terminée : rappel quotidien en cours
+      filter.status = { $in: ['planned', 'notified', 'message_sent', 'response_received'] };
+      filter.dueAt = { $lt: new Date() };
+    } else if (scope === 'open') filter.status = { $in: ['planned', 'notified', 'message_sent', 'response_received'] };
+    else if (scope === 'all') filter.status = { $ne: 'cancelled' };
     const list = await CallAssignment.find(filter)
-      .sort({ dueAt: scope === 'done' ? -1 : 1 })
+      .sort({ dueAt: scope === 'done' || scope === 'all' ? -1 : 1 })
       .limit(300)
       .select('-recommendation.ranking -message.versions -history')
       .populate('volunteerId', 'fullName whatsapp')
@@ -38,7 +46,7 @@ callAssignmentsRouter.get(
         select: 'date congregationName venueId tasks.label status responsibleContactId',
         populate: [
           { path: 'venueId', select: 'name' },
-          { path: 'responsibleContactId', select: 'fullName phones' },
+          { path: 'responsibleContactId', select: 'fullName phones whatsappPhones' },
         ],
       })
       .lean();
@@ -54,12 +62,20 @@ callAssignmentsRouter.get(
     if (!a) throw notFound('Mission');
     const event = await WorkEvent.findById(a.workEventId)
       .populate('venueId', 'name city')
-      .populate('responsibleContactId', 'fullName phones role')
+      .populate('responsibleContactId', 'fullName phones role whatsappPhones')
       .populate('tasks.catalogEntryId', 'title frequency materials ppe products steps notes reference')
       .lean();
     const v = a.volunteerId as unknown as { whatsapp?: string } | null;
+    // Quand l’application prévient le propriétaire pour cette mission (échéance, puis retards)
+    await ensureOverdueReminders();
+    const reminders = await NotificationJob.find({ callAssignmentId: a._id, status: { $in: ['scheduled', 'sent', 'failed'] } })
+      .sort({ dueAt: 1 })
+      .select('kind dueAt status deliveryStatus')
+      .limit(20)
+      .lean();
     res.json({
       ...a,
+      reminders,
       event,
       whatsappUrl: v?.whatsapp && a.message?.text ? whatsappLink(v.whatsapp, a.message.text) : null,
       volunteerPhoneDisplay: v?.whatsapp ? formatPhoneDisplay(v.whatsapp) : null,
@@ -84,8 +100,13 @@ callAssignmentsRouter.post(
     const body = parse(z.object({ volunteerId: objectId.nullable(), auto: z.boolean().optional() }), req.body);
     const a = await CallAssignment.findById(param(req, 'id'));
     if (!a) throw notFound('Mission');
-    if (['message_sent', 'response_received', 'completed'].includes(a.status)) {
-      throw badRequest('Le message a déjà été envoyé pour cette mission');
+    if (a.status === 'completed') throw badRequest('Mission déjà marquée comme accomplie : rouvrez-la d’abord');
+    if (a.status === 'cancelled') throw badRequest('Mission annulée');
+    // Renvoi : le message a déjà été envoyé à un volontaire, on en choisit un autre et on renvoie
+    if (['message_sent', 'response_received'].includes(a.status)) {
+      a.status = 'notified';
+      a.sentConfirmedAt = null;
+      a.history.push({ at: new Date(), action: 'resend_started' });
     }
     if (body.auto) {
       await autoAssign(a, { force: true });
@@ -153,8 +174,11 @@ callAssignmentsRouter.post(
     if (!a) throw notFound('Mission');
     if (!a.volunteerId) throw badRequest('Aucun volontaire affecté');
     if (a.status === 'cancelled') throw badRequest('Mission annulée');
+    if (a.status === 'completed') throw badRequest('Mission déjà accomplie');
     a.status = 'message_sent';
     a.sentConfirmedAt = new Date();
+    const vol = await Volunteer.findById(a.volunteerId).select('fullName').lean();
+    a.sends.push({ at: a.sentConfirmedAt, volunteerId: a.volunteerId, volunteerName: vol?.fullName ?? '' });
     a.history.push({ at: new Date(), action: 'message_sent_confirmed', details: { text: a.message?.text } });
     await a.save();
     await cancelJobs({ callAssignmentId: a._id });
@@ -178,8 +202,52 @@ callAssignmentsRouter.post(
     if (a.status !== 'message_sent') throw badRequest("La mission n'est pas marquée comme envoyée");
     a.status = 'notified';
     a.sentConfirmedAt = null;
+    a.sends.pop();
     a.history.push({ at: new Date(), action: 'message_sent_undone' });
     await a.save();
+    res.json(a);
+  }),
+);
+
+/**
+ * Fin de mission, toujours MANUELLE : « faite » ou « non faite », commentaire facultatif.
+ * Possible même sans message envoyé ni compte rendu (mission vide). Arrête tous les rappels.
+ */
+callAssignmentsRouter.post(
+  '/:id/complete',
+  ah(async (req, res) => {
+    const { note, outcome } = parse(
+      z.object({ note: z.string().max(2000).optional(), outcome: z.enum(['done', 'not_done']).default('done') }),
+      req.body ?? {},
+    );
+    const a = await CallAssignment.findById(param(req, 'id'));
+    if (!a) throw notFound('Mission');
+    if (a.status === 'cancelled') throw badRequest('Mission annulée');
+    a.status = 'completed';
+    a.completedAt = new Date();
+    a.completionOutcome = outcome;
+    a.completionNote = note?.trim() ?? '';
+    a.history.push({ at: a.completedAt, action: outcome === 'done' ? 'completed_done' : 'completed_not_done', details: { note: a.completionNote } });
+    await a.save();
+    await cancelJobs({ callAssignmentId: a._id });
+    await audit('complete', 'call_assignment', a._id, { outcome });
+    res.json(a);
+  }),
+);
+
+/** Annule la fin de mission (erreur de manipulation) : les rappels de retard reprennent. */
+callAssignmentsRouter.post(
+  '/:id/reopen',
+  ah(async (req, res) => {
+    const a = await CallAssignment.findById(param(req, 'id'));
+    if (!a) throw notFound('Mission');
+    if (a.status !== 'completed') throw badRequest('Cette mission n’est pas terminée');
+    a.status = a.sentConfirmedAt ? 'message_sent' : 'notified';
+    a.completedAt = null;
+    a.completionOutcome = null;
+    a.history.push({ at: new Date(), action: 'completion_undone' });
+    await a.save();
+    await ensureOverdueReminders(new Date(), { force: true });
     res.json(a);
   }),
 );

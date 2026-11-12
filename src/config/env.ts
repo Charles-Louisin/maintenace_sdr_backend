@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().default(4000),
+  PORT: z.coerce.number().default(5000),
   CORS_ORIGINS: z.string().default(''),
   MONGODB_URI: z.string().min(1),
   JWT_ACCESS_SECRET: z.string().min(32),
@@ -11,7 +11,7 @@ const schema = z.object({
   ACCESS_TOKEN_TTL: z.string().default('15m'),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().default(30),
   DOWNLOAD_URL_SECRET: z.string().min(32),
-  PUBLIC_BASE_URL: z.string().default('http://localhost:4000'),
+  PUBLIC_BASE_URL: z.string().default('http://localhost:5000'),
   UPLOADTHING_TOKEN: z.string().optional().default(''),
   UPLOADTHING_ACL: z.enum(['private', 'public-read']).default('public-read'),
   STORAGE_DRIVER: z.enum(['local', 'uploadthing']).default('uploadthing'),

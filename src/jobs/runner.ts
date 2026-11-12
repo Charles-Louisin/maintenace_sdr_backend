@@ -1,6 +1,7 @@
 import { processDueJobs, checkReceipts } from '../modules/notifications/notifications.service.js';
 import { runPeriodicChecks } from '../modules/notifications/periodic.service.js';
 import { processPendingBatches } from '../modules/extraction/extraction.pipeline.js';
+import { ensureOverdueReminders } from '../modules/notifications/overdue.service.js';
 import { logger } from '../lib/logger.js';
 
 /**
@@ -19,6 +20,7 @@ export function startRunner(intervalMs = 30_000) {
       if (tick % 10 === 0) {
         await checkReceipts();
         await runPeriodicChecks();
+        await ensureOverdueReminders();
       }
       tick++;
     } catch (err) {

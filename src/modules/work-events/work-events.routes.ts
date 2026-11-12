@@ -65,7 +65,7 @@ workEventsRouter.get(
       .sort({ date: 1 })
       .limit(1000)
       .populate('venueId', 'name city')
-      .populate('responsibleContactId', 'fullName phones')
+      .populate('responsibleContactId', 'fullName phones whatsappPhones')
       .select('-history -sources')
       .lean();
     const assignments = await CallAssignment.find({ workEventId: { $in: events.map((e) => e._id) } })
@@ -93,7 +93,7 @@ workEventsRouter.get(
   ah(async (req, res) => {
     const e = await WorkEvent.findById(param(req, 'id'))
       .populate('venueId', 'name city congregations')
-      .populate('responsibleContactId', 'fullName phones role')
+      .populate('responsibleContactId', 'fullName phones role whatsappPhones')
       .populate('tasks.catalogEntryId')
       .lean();
     if (!e) throw notFound('Intervention');

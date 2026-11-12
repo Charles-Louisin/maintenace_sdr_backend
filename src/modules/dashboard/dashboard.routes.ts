@@ -35,7 +35,7 @@ dashboardRouter.get(
       PushDevice.countDocuments({ enabled: true }),
       previewMonth(prev.year, prev.month),
     ]);
-    const awaitingResponse = await CallAssignment.countDocuments({ status: 'message_sent' });
+    const awaitingResponse = await CallAssignment.countDocuments({ status: { $in: ['message_sent', 'response_received'] } });
     res.json({
       upcoming,
       counts: {

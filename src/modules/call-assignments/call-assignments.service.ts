@@ -99,6 +99,7 @@ async function buildMessageData(a: AssignmentDoc): Promise<{ ctx: MessageContext
     callDate: DateTime.fromJSDate(a.dueAt).setZone(s.timezone).toISODate()!,
     responsibleName: contact?.fullName ?? null,
     responsiblePhone: contact?.phones?.[0] ?? null,
+    responsibleWhatsapp: Boolean(contact?.phones?.[0] && contact.whatsappPhones?.includes(contact.phones[0])),
     tasks: event.tasks.map((t) => {
       const c = t.catalogEntryId ? byId.get(String(t.catalogEntryId)) : null;
       return {

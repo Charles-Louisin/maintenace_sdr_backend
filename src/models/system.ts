@@ -7,6 +7,7 @@ export const NOTIFICATION_KINDS = [
   'missing_info',
   'unassigned_mission',
   'incomplete_report',
+  'overdue_mission',
 ] as const;
 
 /**
@@ -40,7 +41,7 @@ const notificationJobSchema = new Schema(
     receipts: { type: [{ ticketId: String, status: String, message: String, checkedAt: Date, _id: false }], default: [] },
     deliveryStatus: {
       type: String,
-      enum: ['unknown', 'accepted_by_expo', 'delivered_to_provider', 'error', 'no_device'],
+      enum: ['unknown', 'accepted_by_expo', 'delivered_to_provider', 'local_device', 'error', 'no_device'],
       default: 'unknown',
     },
     openedAt: { type: Date, default: null },

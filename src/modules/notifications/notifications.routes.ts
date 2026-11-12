@@ -4,6 +4,7 @@ import { Expo } from 'expo-server-sdk';
 import { ah, parse, param, qstr } from '../../lib/http.js';
 import { NotificationJob, PushDevice } from '../../models/system.js';
 import { badRequest, notFound } from '../../lib/errors.js';
+import { ensureOverdueReminders } from './overdue.service.js';
 
 export const notificationsRouter = Router();
 
@@ -12,6 +13,7 @@ notificationsRouter.get(
   '/',
   ah(async (req, res) => {
     const scope = qstr(req, 'scope') ?? 'feed';
+    if (scope === 'upcoming') await ensureOverdueReminders();
     const filter: Record<string, unknown> =
       scope === 'upcoming'
         ? { status: 'scheduled', dueAt: { $gt: new Date() } }
@@ -36,7 +38,11 @@ notificationsRouter.post(
   }),
 );
 
-/** Enregistrement du jeton push du téléphone du propriétaire. */
+/**
+ * Enregistrement du téléphone du propriétaire :
+ * - jeton Expo Push (si Firebase est configuré un jour) ;
+ * - ou identifiant « local:… » : le téléphone programme lui-même les rappels (méthode sans Firebase).
+ */
 notificationsRouter.post(
   '/devices',
   ah(async (req, res) => {
@@ -44,7 +50,8 @@ notificationsRouter.post(
       z.object({ token: z.string().min(10).max(200), platform: z.string().max(20).optional(), permission: z.string().max(20).optional() }),
       req.body,
     );
-    if (!Expo.isExpoPushToken(body.token)) throw badRequest('Jeton de notification invalide');
+    const isLocal = /^local:[A-Za-z0-9-]{8,64}$/.test(body.token);
+    if (!isLocal && !Expo.isExpoPushToken(body.token)) throw badRequest('Jeton de notification invalide');
     await PushDevice.findOneAndUpdate(
       { token: body.token },
       { ...body, enabled: body.permission !== 'denied', lastSeenAt: new Date(), lastError: '' },

@@ -12,7 +12,7 @@ API de l’application **BATIS** (suivi de la maintenance des Salles du Royaume)
 | IA | OpenRouter, sorties JSON strictes validées par Zod ; OCR `mistral-ocr` pour les PDF numérisés |
 | Lecture | ExcelJS (sans IA), `unpdf` (PDF texte) |
 | Rapport mensuel | Copie remplie du modèle Word fourni (PizZip + xmldom) |
-| Notifications | Expo Push ; file d’échéances stockée dans MongoDB (pas de Redis) |
+| Notifications | Échéances calculées par le serveur (MongoDB) et programmées **sur le téléphone** en rappels locaux : aucun Firebase requis. Expo Push reste pris en charge si un jeton Expo est enregistré |
 | Sécurité | Argon2id, JWT courts + jetons de renouvellement à rotation, Helmet, limitation de débit |
 
 ## Installation
@@ -28,11 +28,32 @@ Variables essentielles : `MONGODB_URI`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET
 ## Lancement
 
 ```bash
-npm run dev            # API sur le port 4000
+npm run dev            # API sur le port 5000
 npm run worker:dev     # worker : notifications, analyses de documents
 ```
 
 Un seul processus (petit serveur) : `RUN_WORKER_IN_PROCESS=true`. Production : `npm run build`, puis `npm start` et `npm run worker`, derrière un proxy HTTPS (les requêtes non HTTPS sont refusées en production).
+
+## Déploiement sur Railway
+
+1. Railway › New Project › Deploy from GitHub repo › ce dépôt. `railway.json` fournit la construction (`npm run build`), le démarrage (`npm start`) et le contrôle `/health`.
+2. Settings › Networking › **Generate Domain** : vous obtenez `https://<nom>.up.railway.app` (HTTPS fourni par Railway).
+3. Variables (onglet Variables) — les mêmes que `.env`, avec ces valeurs de production :
+
+| Variable | Valeur |
+|---|---|
+| `NODE_ENV` | `production` |
+| `PUBLIC_BASE_URL` | `https://<nom>.up.railway.app` (sert aux liens de téléchargement) |
+| `CORS_ORIGINS` | vide (l’application mobile n’envoie pas d’en-tête Origin) |
+| `PORT` | `5000` |
+| `RUN_WORKER_IN_PROCESS` | `true` (API + rappels dans un seul service) |
+| `STORAGE_DRIVER` | `uploadthing` |
+| `MONGODB_URI`, `MONGODB_DB`, `UPLOADTHING_TOKEN`, `OPENROUTER_*`, `EXPO_ACCESS_TOKEN` | comme en local |
+| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `DOWNLOAD_URL_SECRET` | nouveaux secrets, différents du local |
+
+`PORT=5000`, et dans Settings › Networking, le domaine doit pointer vers le port **5000**. Dans MongoDB Atlas › Network Access, autoriser `0.0.0.0/0` (Railway n’a pas d’IP fixe ; l’accès reste protégé par le mot de passe de la base).
+
+4. Côté application : `EXPO_PUBLIC_API_URL=https://<nom>.up.railway.app` dans l’environnement EAS `production`, puis nouveau build.
 
 ## Fonctionnement
 

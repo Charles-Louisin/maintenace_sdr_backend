@@ -108,6 +108,16 @@ const callAssignmentSchema = new Schema(
       default: [],
     },
     sentConfirmedAt: { type: Date, default: null },
+    /** Chaque envoi confirmé (un renvoi à un autre volontaire ajoute une ligne) */
+    sends: {
+      type: [{ at: { type: Date, default: Date.now }, volunteerId: { type: Schema.Types.ObjectId, ref: 'Volunteer' }, volunteerName: String, _id: false }],
+      default: [],
+    },
+    /** Confirmation manuelle que la mission a été accomplie (distincte de l'envoi du message) */
+    completedAt: { type: Date, default: null },
+    completionNote: { type: String, default: '' },
+    /** Terminée « faite » ou « non faite » */
+    completionOutcome: { type: String, enum: ['done', 'not_done', null], default: null },
     whatsappOpenedAt: { type: Date, default: null },
     history: {
       type: [{ at: { type: Date, default: Date.now }, action: String, details: Schema.Types.Mixed, _id: false }],

@@ -83,6 +83,15 @@ async function claimNext() {
   );
 }
 
+/** La mission passe « à transmettre » quand le propriétaire a été prévenu. */
+async function markOwnerNotified(job: { kind: string; callAssignmentId?: Types.ObjectId | null }) {
+  if (!job.callAssignmentId || (job.kind !== 'pre_call' && job.kind !== 'post_call')) return;
+  await CallAssignment.updateOne(
+    { _id: job.callAssignmentId, status: 'planned' },
+    { status: 'notified', $push: { history: { at: new Date(), action: 'owner_notified' } } },
+  );
+}
+
 export async function processDueJobs(limit = 50): Promise<number> {
   let processed = 0;
   for (; processed < limit; processed++) {
@@ -97,6 +106,14 @@ export async function processDueJobs(limit = 50): Promise<number> {
         continue;
       }
       const valid = devices.filter((d) => Expo.isExpoPushToken(d.token));
+      if (!valid.length) {
+        // Téléphone en mode « rappels locaux » (sans Firebase) : il a programmé lui-même cette
+        // notification à la même heure ; le serveur l'enregistre comme délivrée sur l'appareil.
+        job.set({ status: 'sent', deliveryStatus: 'local_device', sentAt: new Date(), lastError: '', lockedAt: null });
+        await job.save();
+        await markOwnerNotified(job);
+        continue;
+      }
       const messages: ExpoPushMessage[] = valid.map((d) => ({
         to: d.token,
         title: job.title,
@@ -129,12 +146,7 @@ export async function processDueJobs(limit = 50): Promise<number> {
         ...(anyOk ? {} : { dueAt: new Date(Date.now() + 2 ** job.attempts * 60000) }),
       });
       await job.save();
-      if (anyOk && job.callAssignmentId && (job.kind === 'pre_call' || job.kind === 'post_call')) {
-        await CallAssignment.updateOne(
-          { _id: job.callAssignmentId, status: 'planned' },
-          { status: 'notified', $push: { history: { at: new Date(), action: 'owner_notified' } } },
-        );
-      }
+      if (anyOk) await markOwnerNotified(job);
     } catch (err) {
       // Nouvelle tentative avec délai exponentiel
       const failed = job.attempts >= job.maxAttempts;

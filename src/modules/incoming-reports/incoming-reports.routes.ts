@@ -265,6 +265,10 @@ incomingReportsRouter.post(
     const a = await CallAssignment.findById(r.callAssignmentId);
     if (a) {
       a.status = r.type === 'post' ? 'completed' : 'response_received';
+      if (r.type === 'post') {
+        a.completedAt = new Date();
+        a.completionOutcome = 'done';
+      }
       a.history.push({ at: new Date(), action: 'report_validated', details: { reportId: r._id } });
       await a.save();
     }

@@ -234,6 +234,18 @@ describe('Parcours complet', () => {
     expect(j!.status).toBe('failed');
     expect(j!.deliveryStatus).toBe('no_device');
 
+    // Téléphone en rappels locaux (sans Firebase) : la notification est comptée comme délivrée sur l’appareil
+    await request(app).post('/api/notifications/devices').set(auth()).send({ token: 'local:test-device-0001', platform: 'android', permission: 'granted' }).expect(200);
+    await mods.models.NotificationJob.updateOne({ _id: job!._id }, { status: 'scheduled', dueAt: new Date(Date.now() - 1000), attempts: 0 });
+    await mods.notif.processDueJobs();
+    j = await mods.models.NotificationJob.findById(job!._id).lean();
+    expect(j!.status).toBe('sent');
+    expect(j!.deliveryStatus).toBe('local_device');
+    expect((await mods.models.CallAssignment.findById(j!.callAssignmentId).lean())!.status).toBe('notified');
+    await mods.models.CallAssignment.updateOne({ _id: j!.callAssignmentId }, { status: 'planned' });
+    const PushDevice = (await import('../src/models/system.js')).PushDevice;
+    await PushDevice.deleteMany({});
+
     await request(app).post('/api/notifications/devices').set(auth()).send({ token: 'ExponentPushToken[abcdefghijklmnopqrstuv]', platform: 'android', permission: 'granted' }).expect(200);
     await mods.models.NotificationJob.updateOne({ _id: job!._id }, { status: 'scheduled', dueAt: new Date(Date.now() - 1000), attempts: 0 });
     await mods.notif.processDueJobs(); // 1re tentative : erreur réseau -> reprogrammée
@@ -262,6 +274,107 @@ describe('Parcours complet', () => {
     a = await mods.models.CallAssignment.findById(pre!._id).lean();
     expect(a!.status).toBe('message_sent');
     expect(a!.sentConfirmedAt).toBeTruthy();
+  });
+
+  it('renvoie l’appel préalable à un autre volontaire puis confirme qu’il est accompli', async () => {
+    const pre = await mods.models.CallAssignment.findOne({ workEventId: eventIds[0], type: 'pre' }).lean();
+    const first = String(pre!.volunteerId);
+    // Envoyé ne veut pas dire accompli
+    await request(app).post(`/api/call-assignments/${pre!._id}/complete`).set(auth()).send({}).expect(200).then(async () => {
+      await request(app).post(`/api/call-assignments/${pre!._id}/reopen`).set(auth()).expect(200);
+    });
+    let a = await mods.models.CallAssignment.findById(pre!._id).lean();
+    expect(a!.status).toBe('message_sent');
+    // Second envoi à un autre volontaire
+    const rec = await request(app).get(`/api/call-assignments/${pre!._id}/recommendations`).set(auth()).expect(200);
+    const other = rec.body.ranking.find((r: { volunteerId: string }) => r.volunteerId !== first);
+    await request(app).post(`/api/call-assignments/${pre!._id}/assign`).set(auth()).send({ volunteerId: other.volunteerId }).expect(200);
+    a = await mods.models.CallAssignment.findById(pre!._id).lean();
+    expect(a!.status).toBe('notified');
+    await request(app).post(`/api/call-assignments/${pre!._id}/mark-sent`).set(auth()).expect(200);
+    a = await mods.models.CallAssignment.findById(pre!._id).lean();
+    expect(a!.sends.map((x) => String(x.volunteerId))).toEqual([first, other.volunteerId]);
+    // Confirmation avec commentaire
+    await request(app).post(`/api/call-assignments/${pre!._id}/complete`).set(auth()).send({ note: 'Responsable joint, matériel prêt' }).expect(200);
+    a = await mods.models.CallAssignment.findById(pre!._id).lean();
+    expect(a!.status).toBe('completed');
+    expect(a!.completionNote).toBe('Responsable joint, matériel prêt');
+    // Une mission accomplie ne peut plus être réattribuée
+    await request(app).post(`/api/call-assignments/${pre!._id}/assign`).set(auth()).send({ volunteerId: first }).expect(400);
+  });
+
+  it('rappelle chaque jour une mission en retard, jusqu’à ce qu’elle soit marquée non faite', async () => {
+    const post = await mods.models.CallAssignment.findOne({ workEventId: eventIds[0], type: 'post' });
+    const originalDue = post!.dueAt;
+    post!.dueAt = new Date(Date.now() - 3 * 86400000 - 3600000); // échéance dépassée depuis 3 jours
+    await post!.save();
+    const { ensureOverdueReminders } = await import('../src/modules/notifications/overdue.service.js');
+    await ensureOverdueReminders(new Date(), { force: true });
+    await ensureOverdueReminders(new Date(), { force: true }); // idempotent
+    let jobs = await mods.models.NotificationJob.find({ callAssignmentId: post!._id, kind: 'overdue_mission', status: 'scheduled' }).lean();
+    expect(jobs.length).toBe(7); // un par jour sur les 7 prochains jours
+    expect(new Set(jobs.map((j) => j.dedupKey)).size).toBe(7);
+    const overdue = await request(app).get('/api/call-assignments?scope=overdue').set(auth()).expect(200);
+    expect(overdue.body.some((x: { _id: string }) => x._id === String(post!._id))).toBe(true);
+    const detail = await request(app).get(`/api/call-assignments/${post!._id}`).set(auth()).expect(200);
+    expect(detail.body.reminders.some((r: { kind: string }) => r.kind === 'overdue_mission')).toBe(true);
+    // Mission vide marquée « non faite » : terminée, rappels arrêtés
+    await request(app).post(`/api/call-assignments/${post!._id}/complete`).set(auth()).send({ outcome: 'not_done' }).expect(200);
+    const done = await mods.models.CallAssignment.findById(post!._id).lean();
+    expect(done!.status).toBe('completed');
+    expect(done!.completionOutcome).toBe('not_done');
+    jobs = await mods.models.NotificationJob.find({ callAssignmentId: post!._id, kind: 'overdue_mission', status: 'scheduled' }).lean();
+    expect(jobs.length).toBe(0);
+    const finished = await request(app).get('/api/call-assignments?scope=done').set(auth()).expect(200);
+    expect(finished.body.some((x: { _id: string }) => x._id === String(post!._id))).toBe(true);
+    // Retour à l’état initial pour la suite du parcours
+    await request(app).post(`/api/call-assignments/${post!._id}/reopen`).set(auth()).expect(200);
+    await mods.models.CallAssignment.updateOne({ _id: post!._id }, { dueAt: originalDue, status: 'planned' });
+    await mods.models.NotificationJob.updateMany({ callAssignmentId: post!._id, kind: 'overdue_mission' }, { status: 'cancelled' });
+  });
+
+  it('marque chaque numéro du responsable comme WhatsApp ou non et le précise dans le message', async () => {
+    const e = await mods.models.WorkEvent.findById(eventIds[0]).lean();
+    const post = await mods.models.CallAssignment.findOne({ workEventId: eventIds[0], type: 'post' }).lean();
+    await request(app).patch(`/api/contacts/${e!.responsibleContactId}`).set(auth()).send({ phones: ['675412391', '696296626'], whatsappPhones: ['+237 6 96 29 66 26'] }).expect(200);
+    let c = await request(app).get(`/api/contacts/${e!.responsibleContactId}`).set(auth()).expect(200);
+    expect(c.body.whatsappPhones).toEqual(['237696296626']); // seul le 2e numéro
+    let d0 = await request(app).get(`/api/call-assignments/${post!._id}`).set(auth()).expect(200);
+    expect(d0.body.message.text).not.toContain('(WhatsApp)'); // le message cite le 1er numéro
+    await request(app).patch(`/api/contacts/${e!.responsibleContactId}`).set(auth()).send({ whatsappPhones: ['675412391', '696296626'] }).expect(200);
+    c = await request(app).get(`/api/contacts/${e!.responsibleContactId}`).set(auth()).expect(200);
+    expect(c.body.whatsappPhones).toHaveLength(2); // les deux
+    const d = await request(app).get(`/api/call-assignments/${post!._id}`).set(auth()).expect(200);
+    expect(d.body.event.responsibleContactId.whatsappPhones).toHaveLength(2);
+    expect(d.body.message.text).toContain('(WhatsApp)');
+    await request(app).patch(`/api/contacts/${e!.responsibleContactId}`).set(auth()).send({ whatsappPhones: [] }).expect(200);
+    const after = await request(app).get(`/api/call-assignments/${post!._id}`).set(auth()).expect(200);
+    expect(after.body.message.text).not.toContain('(WhatsApp)');
+  });
+
+  it('renomme une assemblée et met à jour ses interventions', async () => {
+    const e = await mods.models.WorkEvent.findById(eventIds[0]).lean();
+    const v = await request(app).get(`/api/venues/${e!.venueId}`).set(auth()).expect(200);
+    const congs = v.body.congregations.map((c: { _id: string; name: string }) => ({
+      _id: c._id,
+      name: String(c._id) === String(e!.congregationId) ? 'Assemblée Renommée' : c.name,
+    }));
+    await request(app).patch(`/api/venues/${e!.venueId}`).set(auth()).send({ name: 'Salle Renommée', congregations: congs }).expect(200);
+    const after = await mods.models.WorkEvent.findById(eventIds[0]).lean();
+    expect(after!.congregationName).toBe('Assemblée Renommée');
+    const venue = await request(app).get(`/api/venues/${e!.venueId}`).set(auth()).expect(200);
+    const renamed = venue.body.congregations.find((c: { _id: string }) => String(c._id) === String(e!.congregationId));
+    expect(renamed.aliases).toContain(e!.congregationName);
+    // Retirer une assemblée qui a des interventions est refusé
+    const without = congs.filter((c: { _id: string }) => String(c._id) !== String(e!.congregationId));
+    await request(app).patch(`/api/venues/${e!.venueId}`).set(auth()).send({ congregations: without }).expect(400);
+    // Retour aux noms d’origine pour la suite du parcours
+    await request(app)
+      .patch(`/api/venues/${e!.venueId}`)
+      .set(auth())
+      .send({ name: v.body.name, congregations: v.body.congregations.map((c: { _id: string; name: string }) => ({ _id: c._id, name: c.name })) })
+      .expect(200);
+    expect((await mods.models.WorkEvent.findById(eventIds[0]).lean())!.congregationName).toBe(e!.congregationName);
   });
 
   it('permet la réattribution manuelle', async () => {

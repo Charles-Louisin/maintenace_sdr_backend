@@ -2,9 +2,11 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { ah, parse, param, objectId } from '../../lib/http.js';
 import { Venue } from '../../models/registry.js';
-import { WorkEvent } from '../../models/work.js';
+import { CallAssignment, WorkEvent } from '../../models/work.js';
+import { eventDedupKey } from '../extraction/normalize.js';
+import { regenerateMessage } from '../call-assignments/call-assignments.service.js';
 import { normKey } from '../../lib/text.js';
-import { notFound, conflict } from '../../lib/errors.js';
+import { notFound, conflict, badRequest } from '../../lib/errors.js';
 import { audit } from '../audit/audit.service.js';
 
 export const venuesRouter = Router();
@@ -53,7 +55,7 @@ venuesRouter.post(
 venuesRouter.get(
   '/:id',
   ah(async (req, res) => {
-    const v = await Venue.findById(param(req, 'id')).populate('congregations.coordinatorId', 'fullName phones').lean();
+    const v = await Venue.findById(param(req, 'id')).populate('congregations.coordinatorId', 'fullName phones whatsappPhones').lean();
     if (!v) throw notFound('Salle');
     const events = await WorkEvent.find({ venueId: v._id }).sort({ date: -1 }).limit(100).lean();
     res.json({ ...v, events });
@@ -71,8 +73,47 @@ venuesRouter.patch(
       if (await Venue.exists({ nameKey, _id: { $ne: v._id } })) throw conflict('Une salle porte déjà ce nom');
       v.set('nameKey', nameKey);
     }
+    const before = new Map(v.congregations.map((c) => [String(c._id), c.name]));
+    const renamed: { id: string; name: string }[] = [];
+    if (body.congregations) {
+      const kept = new Set(body.congregations.filter((c) => c._id).map((c) => String(c._id)));
+      for (const [cid, cname] of before) {
+        if (!kept.has(cid) && (await WorkEvent.exists({ venueId: v._id, congregationId: cid }))) {
+          throw badRequest(`« ${cname} » a des interventions enregistrées : renommez-la plutôt que de la retirer`);
+        }
+      }
+      for (const c of body.congregations) {
+        const old = c._id ? before.get(String(c._id)) : undefined;
+        if (old && old !== c.name) {
+          renamed.push({ id: String(c._id), name: c.name });
+          // L'ancien nom reste reconnu dans les prochains documents importés
+          c.aliases = [...new Set([...(c.aliases ?? []), old])];
+        }
+      }
+    }
+    const nameChanged = Boolean(body.name && body.name !== v.name);
     v.set(body);
     await v.save();
+
+    // Les interventions gardent une copie du nom de l'assemblée : on la met à jour
+    for (const r of renamed) {
+      const events = await WorkEvent.find({ venueId: v._id, congregationId: r.id });
+      for (const e of events) {
+        e.congregationName = r.name;
+        e.dedupKey = eventDedupKey(String(v._id), r.name, e.date);
+        e.history.push({ at: new Date(), action: 'congregation_renamed', details: { name: r.name } });
+        await e.save();
+      }
+    }
+    // Messages pas encore envoyés : régénérés avec les nouveaux noms (sauf s'ils ont été modifiés à la main)
+    if (nameChanged || renamed.length) {
+      const eventIds = (await WorkEvent.find({ venueId: v._id }).select('_id').lean()).map((e) => e._id);
+      const pending = await CallAssignment.find({ workEventId: { $in: eventIds }, status: { $in: ['planned', 'notified'] } });
+      for (const a of pending) {
+        await regenerateMessage(a, { keepEdited: true });
+        await a.save();
+      }
+    }
     await audit('update', 'venue', v._id, body);
     res.json(v);
   }),

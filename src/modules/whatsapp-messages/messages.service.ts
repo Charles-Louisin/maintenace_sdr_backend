@@ -12,6 +12,8 @@ export interface MessageContext {
   callDate: string; // AAAA-MM-JJ (jour où le message est transmis)
   responsibleName: string | null;
   responsiblePhone: string | null;
+  /** Numéro joignable sur WhatsApp : précisé dans le message */
+  responsibleWhatsapp?: boolean;
   tasks: {
     label: string;
     category?: string;
@@ -89,7 +91,7 @@ export function renderMessage(template: string, ctx: MessageContext): string {
     date: formatDateFr(ctx.eventDate),
     date_relative: relativeDay(ctx.eventDate, ctx.callDate),
     responsable: ctx.responsibleName || MISSING,
-    telephone_responsable: ctx.responsiblePhone ? formatPhoneDisplay(ctx.responsiblePhone) : MISSING,
+    telephone_responsable: ctx.responsiblePhone ? `${formatPhoneDisplay(ctx.responsiblePhone)}${ctx.responsibleWhatsapp ? ' (WhatsApp)' : ''}` : MISSING,
     travaux: renderWorks(ctx),
     taches: renderTaskDetails(ctx),
     consignes: renderInstructions(ctx),
