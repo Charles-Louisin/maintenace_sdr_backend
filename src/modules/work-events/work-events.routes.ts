@@ -5,6 +5,7 @@ import { WorkEvent, CallAssignment, IncomingReport } from '../../models/work.js'
 import { Venue, ResponsibleContact } from '../../models/registry.js';
 import { SourceDocument } from '../../models/documents.js';
 import { notFound, badRequest, conflict } from '../../lib/errors.js';
+import { ALL_CONGREGATIONS } from '../venues/congregation-migration.js';
 import { normKey } from '../../lib/text.js';
 import { eventDedupKey } from '../extraction/normalize.js';
 import { syncEventSchedule, cancelEventSchedule } from '../scheduling/scheduling.service.js';
@@ -114,11 +115,11 @@ workEventsRouter.post(
     const venue = await Venue.findById(body.venueId);
     if (!venue) throw notFound('Salle');
     const cong = body.congregationId ? venue.congregations.id(body.congregationId) : null;
-    const dedupKey = eventDedupKey(String(venue._id), cong?.name ?? null, body.date);
+    const dedupKey = eventDedupKey(String(venue._id), cong?.name ?? ALL_CONGREGATIONS, body.date);
     if (await WorkEvent.exists({ dedupKey })) throw conflict('Une intervention existe déjà à cette date pour cette assemblée');
     const e = await WorkEvent.create({
       ...body,
-      congregationName: cong?.name ?? '',
+      congregationName: cong?.name ?? ALL_CONGREGATIONS,
       dedupKey,
       history: [{ at: new Date(), action: 'created_manually' }],
     });
@@ -145,9 +146,9 @@ workEventsRouter.patch(
       if (!venue) throw notFound('Salle');
       const congId = body.congregationId !== undefined ? body.congregationId : e.congregationId;
       const cong = congId ? venue.congregations.id(congId) : null;
-      const dedupKey = eventDedupKey(String(venue._id), cong?.name ?? null, body.date ?? e.date);
+      const dedupKey = eventDedupKey(String(venue._id), cong?.name ?? ALL_CONGREGATIONS, body.date ?? e.date);
       if (await WorkEvent.exists({ dedupKey, _id: { $ne: e._id } })) throw conflict('Une autre intervention existe déjà à cette date pour cette assemblée');
-      e.set({ dedupKey, congregationName: cong?.name ?? '' });
+      e.set({ dedupKey, congregationName: cong?.name ?? ALL_CONGREGATIONS });
     }
     if (body.tasks) {
       e.set(

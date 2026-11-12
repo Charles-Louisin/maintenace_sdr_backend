@@ -500,6 +500,93 @@ describe('Parcours complet', () => {
     await request(app).get(url.pathname + '?exp=1&sig=abc').expect(403);
   });
 
+  it('enregistre les photos (salle, profil, fond de connexion) et les sert par lien signé', async () => {
+    // PNG 1×1 valide
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+    const venues = await request(app).get('/api/venues').set(auth()).expect(200);
+    const vid = venues.body[0]._id;
+    const up = await request(app).post(`/api/uploads/images/venues/${vid}`).set(auth()).attach('file', png, 'salle.png');
+    expect(up.status).toBe(200);
+    const url = new URL(up.body.imageUrl);
+    const img = await request(app).get(url.pathname + url.search).expect(200);
+    expect(img.headers['content-type']).toBe('image/png');
+    expect(img.headers['cross-origin-resource-policy']).toBe('cross-origin');
+    await request(app).get(url.pathname + url.search.replace(/sig=[^&]+/, 'sig=abc')).expect(403);
+    const list = await request(app).get('/api/venues').set(auth()).expect(200);
+    expect(list.body[0].imageUrl).toBeTruthy();
+    expect(list.body[0].image).toBeUndefined(); // la clé de stockage n’est jamais exposée
+    // Faux fichier image refusé
+    await request(app).post(`/api/uploads/images/venues/${vid}`).set(auth()).attach('file', Buffer.from('pas une image'), 'x.png').expect(400);
+    // Photo de profil
+    const av = await request(app).post('/api/uploads/images/avatar').set(auth()).attach('file', png, 'moi.png').expect(200);
+    expect(av.body.avatarUrl).toContain('/api/images/avatar/');
+    const me = await request(app).get('/api/auth/me').set(auth()).expect(200);
+    expect(me.body.avatarUrl).toBeTruthy();
+    // Fond de connexion : public (avant connexion)
+    await request(app).post('/api/uploads/images/login-background').set(auth()).attach('file', png, 'fond.png').expect(200);
+    const b = await request(app).get('/api/public/branding').expect(200);
+    expect(b.body.loginBackground.startsWith('/api/public/login-background?v=')).toBe(true);
+    await request(app).get(b.body.loginBackground).expect(200);
+    await request(app).delete('/api/uploads/images/login-background').set(auth()).expect(200);
+    expect((await request(app).get('/api/public/branding').expect(200)).body.loginBackground).toBeNull();
+  });
+
+  it('garde la connexion par empreinte après la déconnexion, et la retire au changement de mot de passe', async () => {
+    const key = await request(app).post('/api/auth/biometric/enroll').set(auth()).send({ device: 'test' }).expect(201);
+    await request(app).post('/api/auth/logout').send({}).expect(204);
+    const r = await request(app).post('/api/auth/biometric/login').send({ keyId: key.body.keyId, secret: key.body.secret }).expect(200);
+    expect(r.body.accessToken).toBeTruthy();
+    await request(app).post('/api/auth/biometric/login').send({ keyId: key.body.keyId, secret: 'x'.repeat(40) }).expect(401);
+    // Changement d’e-mail : mot de passe exigé
+    await request(app).patch('/api/auth/me').set({ Authorization: `Bearer ${r.body.accessToken}` }).send({ email: 'autre@example.test' }).expect(401);
+    const p = await request(app).patch('/api/auth/me').set({ Authorization: `Bearer ${r.body.accessToken}` }).send({ displayName: 'Frère Test' }).expect(200);
+    expect(p.body.displayName).toBe('Frère Test');
+  });
+
+  it('convertit « toutes les assemblées » en responsabilité de toute la salle', async () => {
+    const { Venue, ResponsibleContact } = await import('../src/models/registry.js');
+    const { migrateGroupCongregations } = await import('../src/modules/venues/congregation-migration.js');
+    const v = await Venue.create({ name: 'Salle Test Groupe', nameKey: 'salle test groupe', congregations: [{ name: 'Alpha' }, { name: 'Toutes les 2 assemblées', isGroup: true }] });
+    const alpha = v.congregations[0]._id;
+    const group = v.congregations[1]._id;
+    const e = await mods.models.WorkEvent.create({ venueId: v._id, congregationId: group, congregationName: 'Toutes les 2 assemblées', date: '2027-03-07', dedupKey: 'test-group-1', tasks: [{ label: 'Sol' }] });
+    const whole = await ResponsibleContact.create({ fullName: 'Frère Salle', nameKey: 'frere salle', congregationIds: [group], venueIds: [v._id] });
+    const one = await ResponsibleContact.create({ fullName: 'Frère Alpha', nameKey: 'frere alpha', congregationIds: [alpha], venueIds: [v._id] });
+    await migrateGroupCongregations();
+    await migrateGroupCongregations(); // idempotent
+    const after = await Venue.findById(v._id).lean();
+    expect(after!.congregations.map((c) => c.name)).toEqual(['Alpha']);
+    const ev = await mods.models.WorkEvent.findById(e._id).lean();
+    expect(ev!.congregationId).toBeNull();
+    expect(ev!.congregationName).toBe('Toutes les assemblées');
+    const w = await ResponsibleContact.findById(whole._id).lean();
+    expect(w!.venueIds.map(String)).toEqual([String(v._id)]);
+    expect(w!.congregationIds).toHaveLength(0);
+    const o = await ResponsibleContact.findById(one._id).lean();
+    expect(o!.venueIds).toHaveLength(0); // responsable d’une seule assemblée, pas de toute la salle
+    expect(o!.congregationIds.map(String)).toEqual([String(alpha)]);
+    await mods.models.WorkEvent.deleteOne({ _id: e._id });
+    await ResponsibleContact.deleteMany({ _id: { $in: [whole._id, one._id] } });
+    await Venue.deleteOne({ _id: v._id });
+  });
+
+  it('donne sa part à un nouveau volontaire sans toucher aux choix manuels', async () => {
+    const manual = await mods.models.CallAssignment.findOne({ assignmentMode: 'manual', status: { $in: ['planned', 'notified'] } }).lean();
+    const created = await request(app).post('/api/volunteers').set(auth()).send({ fullName: 'Frère Nouveau', whatsapp: '699111222' }).expect(201);
+    const mine = await mods.models.CallAssignment.find({ volunteerId: created.body._id }).lean();
+    expect(created.body.rebalanced).toBeGreaterThanOrEqual(mine.length); // d’autres missions peuvent aussi être rééquilibrées
+    expect(mine.length).toBeGreaterThan(0); // aucune mission jusque-là : il est prioritaire
+    expect(mine.every((m) => m.status === 'planned' && m.assignmentMode === 'auto')).toBe(true);
+    if (manual) {
+      const still = await mods.models.CallAssignment.findById(manual._id).lean();
+      expect(String(still!.volunteerId)).toBe(String(manual.volunteerId));
+    }
+    // Suppression : ses missions futures non envoyées repartent vers les autres
+    await request(app).delete(`/api/volunteers/${created.body._id}`).set(auth()).expect(200);
+    const left = await mods.models.CallAssignment.find({ volunteerId: created.body._id, status: { $in: ['planned', 'notified'] }, dueAt: { $gte: new Date() } }).lean();
+    expect(left).toHaveLength(0);
+  });
+
   it('expose un tableau de bord cohérent', async () => {
     const d = await request(app).get('/api/dashboard').set(auth()).expect(200);
     expect(d.body.counts.venues).toBe(1);

@@ -8,6 +8,7 @@ import { regenerateMessage } from '../call-assignments/call-assignments.service.
 import { normKey } from '../../lib/text.js';
 import { notFound, conflict, badRequest } from '../../lib/errors.js';
 import { audit } from '../audit/audit.service.js';
+import { signImage } from '../images/images.service.js';
 
 export const venuesRouter = Router();
 
@@ -36,7 +37,7 @@ venuesRouter.get(
       { $group: { _id: '$venueId', total: { $sum: 1 } } },
     ]);
     const byId = new Map(counts.map((c) => [String(c._id), c.total]));
-    res.json(venues.map((v) => ({ ...v, eventCount: byId.get(String(v._id)) ?? 0 })));
+    res.json(venues.map(({ image, ...v }) => ({ ...v, imageUrl: signImage('venue', String(v._id), image), eventCount: byId.get(String(v._id)) ?? 0 })));
   }),
 );
 
@@ -58,7 +59,8 @@ venuesRouter.get(
     const v = await Venue.findById(param(req, 'id')).populate('congregations.coordinatorId', 'fullName phones whatsappPhones').lean();
     if (!v) throw notFound('Salle');
     const events = await WorkEvent.find({ venueId: v._id }).sort({ date: -1 }).limit(100).lean();
-    res.json({ ...v, events });
+    const { image, ...rest } = v;
+    res.json({ ...rest, imageUrl: signImage('venue', String(v._id), image), events });
   }),
 );
 

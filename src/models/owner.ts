@@ -22,6 +22,21 @@ const ownerSchema = new Schema(
       },
     ],
     passwordChangedAt: { type: Date, default: Date.now },
+    /** Photo de profil */
+    avatar: { type: new Schema({ driver: String, key: String, mime: String, v: Number }, { _id: false }), default: null },
+    /**
+     * Clés de connexion par empreinte / Face ID : une par téléphone, gardées après la déconnexion.
+     * Le secret n’est stocké que haché ; il est retiré si l’empreinte est désactivée ou le mot de passe changé.
+     */
+    biometricKeys: [
+      {
+        keyId: { type: String, required: true },
+        secretHash: { type: String, required: true },
+        device: { type: String, default: '' },
+        createdAt: { type: Date, default: Date.now },
+        lastUsedAt: { type: Date, default: null },
+      },
+    ],
   },
   { timestamps: true },
 );

@@ -13,6 +13,7 @@ import { contactsRouter } from './modules/contacts/contacts.routes.js';
 import { volunteersRouter } from './modules/volunteers/volunteers.routes.js';
 import { documentsRouter } from './modules/documents/documents.routes.js';
 import { filesRouter } from './modules/documents/files.routes.js';
+import { imagesRouter, imageUploadRouter, publicRouter } from './modules/images/images.routes.js';
 import { extractionsRouter } from './modules/extraction/extraction.routes.js';
 import { workEventsRouter } from './modules/work-events/work-events.routes.js';
 import { callAssignmentsRouter } from './modules/call-assignments/call-assignments.routes.js';
@@ -48,6 +49,8 @@ export function createApp() {
   app.use('/api', rateLimit({ windowMs: 60_000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false }));
   app.use('/api/auth', authRouter);
   app.use('/api/files', rateLimit({ windowMs: 60_000, limit: 60 }), filesRouter);
+  app.use('/api/images', imagesRouter);
+  app.use('/api/public', publicRouter);
 
   // Toutes les autres routes : propriétaire authentifié uniquement
   const api = Router();
@@ -67,6 +70,7 @@ export function createApp() {
   api.use('/reports', monthlyReportsRouter);
   api.use('/notifications', notificationsRouter);
   api.use('/settings', settingsRouter);
+  api.use('/uploads/images', imageUploadRouter);
   api.get(
     '/audit',
     ah(async (_req, res) => {

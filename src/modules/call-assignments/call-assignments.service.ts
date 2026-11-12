@@ -8,6 +8,7 @@ import { rankVolunteers, pickBest, type RankedVolunteer } from './assignment.alg
 import { renderMessage, type MessageContext } from '../whatsapp-messages/messages.service.js';
 import { resolveQuestions } from '../questionnaires/questions.service.js';
 import { notFound } from '../../lib/errors.js';
+import { cancelJobs } from '../notifications/notifications.service.js';
 
 type AssignmentDoc = InstanceType<typeof CallAssignment>;
 
@@ -153,4 +154,34 @@ export async function reassignFutureOf(volunteerId: string): Promise<number> {
     n++;
   }
   return n;
+}
+
+/**
+ * Nouveau volontaire (ou volontaire réactivé) : il prend sa part.
+ * - les missions sans volontaire reçoivent le meilleur volontaire disponible ;
+ * - les missions futures attribuées AUTOMATIQUEMENT et pas encore annoncées (statut « programmé »)
+ *   sont recalculées dans l'ordre des échéances, pour répartir équitablement.
+ * Les choix manuels, les missions déjà annoncées, envoyées ou terminées ne bougent jamais.
+ */
+export async function rebalanceFuture(): Promise<{ filled: number; moved: number }> {
+  const list = await CallAssignment.find({
+    status: { $in: ['planned', 'notified'] },
+    dueAt: { $gte: new Date() },
+    $or: [{ volunteerId: null }, { assignmentMode: 'auto', status: 'planned' }],
+  }).sort({ dueAt: 1 });
+  let filled = 0;
+  let moved = 0;
+  for (const a of list) {
+    const before = a.volunteerId ? String(a.volunteerId) : null;
+    await autoAssign(a, { force: !before });
+    const after = a.volunteerId ? String(a.volunteerId) : null;
+    if (after === before) continue;
+    await regenerateMessage(a, { keepEdited: true });
+    await a.save();
+    if (!before && after) {
+      filled++;
+      await cancelJobs({ dedupKey: `unassigned_mission:${a._id}` });
+    } else moved++;
+  }
+  return { filled, moved };
 }

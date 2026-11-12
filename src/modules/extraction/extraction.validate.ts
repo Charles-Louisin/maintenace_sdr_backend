@@ -6,6 +6,7 @@ import { normKey, titleCase } from '../../lib/text.js';
 import { normalizePhone } from '../../lib/phone.js';
 import { badRequest, notFound, conflict } from '../../lib/errors.js';
 import { eventDedupKey, isGroupCongregation } from './normalize.js';
+import { ALL_CONGREGATIONS } from '../venues/congregation-migration.js';
 import { syncEventSchedule } from '../scheduling/scheduling.service.js';
 import { audit } from '../audit/audit.service.js';
 import { matchContact } from '../contacts/contacts.service.js';
@@ -32,13 +33,12 @@ async function ensureVenue(p: Proposal) {
 async function ensureCongregation(venue: Awaited<ReturnType<typeof ensureVenue>>, p: Proposal) {
   const name = p.congregationName?.trim();
   if (!name) return null;
+  // « Toutes les assemblées » : intervention commune à toute la salle, pas une assemblée
+  if (isGroupCongregation(name)) return null;
   const k = normKey(name);
-  const group = isGroupCongregation(name);
-  let c = venue.congregations.find(
-    (x) => normKey(x.name) === k || x.aliases.some((a) => normKey(a) === k) || (group && x.isGroup),
-  );
+  let c = venue.congregations.find((x) => normKey(x.name) === k || x.aliases.some((a) => normKey(a) === k));
   if (!c) {
-    venue.congregations.push({ name: group ? 'Toutes les assemblées' : titleCase(name), aliases: [name], isGroup: group });
+    venue.congregations.push({ name: titleCase(name), aliases: [name], isGroup: false });
     await venue.save();
     c = venue.congregations[venue.congregations.length - 1];
   }
@@ -53,7 +53,7 @@ async function ensureContact(p: Proposal, venueId: Types.ObjectId, congregationI
     const c = await ResponsibleContact.findById(r.contactId);
     if (!c) throw notFound('Contact');
     for (const ph of [phone, ...(r.otherPhones ?? [])]) if (ph && !c.phones.includes(ph)) c.phones.push(ph);
-    if (!c.venueIds.some((v) => String(v) === String(venueId))) c.venueIds.push(venueId);
+    if (!congregationId && !c.venueIds.some((v) => String(v) === String(venueId))) c.venueIds.push(venueId);
     if (congregationId && !c.congregationIds.some((v) => String(v) === String(congregationId))) c.congregationIds.push(congregationId);
     await c.save();
     return c;
@@ -81,7 +81,7 @@ async function ensureContact(p: Proposal, venueId: Types.ObjectId, congregationI
     nameKey: normKey(r.name),
     phones: [...new Set([phone, ...(r.otherPhones ?? [])].filter((x): x is string => Boolean(x)))],
     role: r.role || 'Coordinateur de nettoyage',
-    venueIds: [venueId],
+    venueIds: congregationId ? [] : [venueId],
     congregationIds: congregationId ? [congregationId] : [],
   });
   await audit('create_from_import', 'contact', c._id);
@@ -155,7 +155,7 @@ async function applyProposal(ex: Extraction, p: Proposal, catalogMap: Map<string
       startTime: p.startTime,
       endTime: p.endTime,
       congregationId: cong?._id ?? null,
-      congregationName: cong?.name ?? p.congregationName,
+      congregationName: cong?.name ?? (isGroupCongregation(p.congregationName) ? ALL_CONGREGATIONS : p.congregationName),
       responsibleContactId: contact?._id ?? event.responsibleContactId,
       dedupKey,
       status: event.status === 'cancelled' ? 'scheduled' : event.status,

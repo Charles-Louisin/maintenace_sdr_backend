@@ -22,6 +22,7 @@ async function main() {
     owner.passwordChangedAt = new Date();
   }
   owner.set('refreshTokens', []);
+  owner.set('biometricKeys', []);
   owner.failedLogins = 0;
   owner.lockedUntil = null;
   await owner.save();

@@ -10,6 +10,7 @@ const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
 
 export const hashSecret = (s: string) => argon2.hash(s, ARGON);
+export const verifyPassword = (hash: string, password: string) => argon2.verify(hash, password).catch(() => false);
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
 export function generateRecoveryCode(): string {
@@ -146,6 +147,7 @@ export async function resetWithRecoveryCode(email: string, recoveryCode: string,
   owner.failedLogins = 0;
   owner.lockedUntil = null;
   owner.set('refreshTokens', []);
+  owner.set('biometricKeys', []);
   await owner.save();
   return { newRecoveryCode: newCode };
 }
@@ -157,5 +159,39 @@ export async function changePassword(ownerId: string, current: string, next: str
   owner.passwordHash = await hashSecret(next);
   owner.passwordChangedAt = new Date();
   owner.set('refreshTokens', []);
+  owner.set('biometricKeys', []);
   await owner.save();
+}
+
+/* ───────────── Connexion par empreinte / Face ID (survit à la déconnexion) ───────────── */
+
+/** Crée la clé de ce téléphone. Le secret n’est renvoyé qu’une fois et gardé dans le stockage sécurisé. */
+export async function enrollBiometric(ownerId: string, device = '') {
+  const keyId = crypto.randomUUID();
+  const secret = crypto.randomBytes(48).toString('base64url');
+  await OwnerAccount.updateOne(
+    { _id: ownerId },
+    { $push: { biometricKeys: { $each: [{ keyId, secretHash: sha256(secret), device }], $slice: -5 } } },
+  );
+  return { keyId, secret };
+}
+
+/** Connexion avec la clé du téléphone, après reconnaissance de l’empreinte par le système. */
+export async function loginWithBiometric(keyId: string, secret: string, device = '') {
+  const owner = await OwnerAccount.findOne({ 'biometricKeys.keyId': keyId });
+  const fail = () => unauthorized('Connexion par empreinte expirée : connectez-vous avec le mot de passe');
+  if (!owner) throw fail();
+  if (owner.lockedUntil && owner.lockedUntil > new Date()) throw new AppError(423, 'LOCKED', 'Trop de tentatives. Réessayez plus tard.');
+  const entry = owner.biometricKeys.find((k) => k.keyId === keyId);
+  const ok = entry && crypto.timingSafeEqual(Buffer.from(entry.secretHash), Buffer.from(sha256(secret)));
+  if (!ok) throw fail();
+  await OwnerAccount.updateOne({ _id: owner._id, 'biometricKeys.keyId': keyId }, { $set: { 'biometricKeys.$.lastUsedAt': new Date() } });
+  return {
+    ...(await issueTokens(String(owner._id), device)),
+    owner: { id: String(owner._id), email: owner.email, displayName: owner.displayName, phone: owner.phone },
+  };
+}
+
+export async function revokeBiometric(ownerId: string, keyId: string) {
+  await OwnerAccount.updateOne({ _id: ownerId }, { $pull: { biometricKeys: { keyId } } });
 }

@@ -9,7 +9,7 @@ import { normalizePhone } from '../../lib/phone.js';
 import { notFound, badRequest } from '../../lib/errors.js';
 import { audit } from '../audit/audit.service.js';
 import { getSettings } from '../settings/settings.service.js';
-import { reassignFutureOf } from '../call-assignments/call-assignments.service.js';
+import { reassignFutureOf, rebalanceFuture } from '../call-assignments/call-assignments.service.js';
 
 export const volunteersRouter = Router();
 
@@ -87,7 +87,9 @@ volunteersRouter.post(
     const body = parse(input, req.body);
     const v = await Volunteer.create({ ...body, whatsapp: normalizeWa(body.whatsapp) });
     await audit('create', 'volunteer', v._id);
-    res.status(201).json(v);
+    // Le nouveau volontaire prend sa part des missions à venir
+    const balance = await rebalanceFuture();
+    res.status(201).json({ ...v.toObject(), rebalanced: balance.filled + balance.moved });
   }),
 );
 
@@ -117,6 +119,11 @@ volunteersRouter.patch(
     await audit('update', 'volunteer', v._id, { fields: Object.keys(body) });
     let reassigned = 0;
     if (body.active === false || body.unavailabilities || body.weeklyAvailability) reassigned = await reassignFutureOf(String(v._id));
+    // Réactivé ou plus disponible : il reprend sa part, et les missions sans volontaire sont pourvues
+    if (body.active === true || body.unavailabilities || body.weeklyAvailability) {
+      const balance = await rebalanceFuture();
+      reassigned += balance.filled + balance.moved;
+    }
     res.json({ volunteer: v, reassigned });
   }),
 );

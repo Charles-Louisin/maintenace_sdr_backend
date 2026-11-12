@@ -66,9 +66,7 @@ function findCongregation(venue: VenueLean | null, name: string | null) {
   if (!venue || !name) return null;
   const k = normKey(name);
   return (
-    venue.congregations.find((c) => normKey(c.name) === k || c.aliases.some((a) => normKey(a) === k)) ??
-    (isGroupCongregation(name) ? venue.congregations.find((c) => c.isGroup) : null) ??
-    null
+    (isGroupCongregation(name) ? null : venue.congregations.find((c) => normKey(c.name) === k || c.aliases.some((a) => normKey(a) === k))) ?? null
   );
 }
 

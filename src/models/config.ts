@@ -89,6 +89,8 @@ export const MonthlyReport = model('MonthlyReport', monthlyReportSchema, 'monthl
 const settingsSchema = new Schema(
   {
     singleton: { type: String, default: 'settings', unique: true },
+    /** Image de fond de l’écran de connexion (null = image intégrée à l’application) */
+    branding: { loginBackground: { type: new Schema({ driver: String, key: String, mime: String, v: Number }, { _id: false }), default: null } },
     timezone: { type: String, default: 'Africa/Douala' },
     preCallDaysBefore: { type: Number, default: 5 },
     preCallTime: { type: String, default: '09:00' },
