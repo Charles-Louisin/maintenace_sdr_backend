@@ -6,6 +6,8 @@ import { formatPhoneDisplay } from '../../lib/phone.js';
 export interface MessageContext {
   type: 'pre' | 'post';
   volunteerName: string | null;
+  /** M = frère, F = sœur */
+  volunteerGender?: 'M' | 'F';
   venueName: string;
   congregationName: string;
   eventDate: string; // AAAA-MM-JJ
@@ -94,8 +96,8 @@ export function renderWeekNotes(ctx: MessageContext): string {
   return lines.join('\n') + '\n';
 }
 
-export function renderQuestions(questions: string[]): string {
-  if (!questions.length) return MISSING;
+export function renderQuestions(questions: string[], optional = false): string {
+  if (!questions.length) return optional ? '' : MISSING;
   return questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
 }
 
@@ -111,9 +113,20 @@ export function renderMessage(template: string, ctx: MessageContext): string {
     const parts = tpl.split(/\n\n(?=[^\n]*$)/);
     tpl = parts.length === 2 ? `${parts[0]}\n{consignes_semaine}\n${parts[1]}` : `${tpl}\n{consignes_semaine}`;
   }
+  // Questionnaire défini mais absent du modèle : les questions sont ajoutées avant le dernier paragraphe
+  if (ctx.questions.length && !tpl.includes('{questions}')) {
+    const intro = ctx.type === 'pre' ? 'Merci de lui poser aussi ces questions' : 'Merci de lui poser les questions suivantes';
+    const block = `${intro} et de me transmettre ses réponses :\n{questions}\n`;
+    const parts = tpl.split(/\n\n(?=[^\n]*$)/);
+    tpl = parts.length === 2 ? `${parts[0]}\n\n${block}\n${parts[1]}` : `${tpl}\n\n${block}`;
+  }
+  // Titre du volontaire : « Frère » ou « Sœur » selon sa fiche
+  const sister = ctx.volunteerGender === 'F';
+  tpl = tpl.replace(/\b([Ff])rère \{volontaire\}/g, (_m, f: string) => `${f === 'F' ? (sister ? 'Sœur' : 'Frère') : sister ? 'sœur' : 'frère'} {volontaire}`);
   const inWeek = ctx.week ? ctx.callDate >= weekBounds(ctx.eventDate).start && ctx.callDate <= weekBounds(ctx.eventDate).end : false;
   const vars: Record<string, string> = {
     volontaire: ctx.volunteerName || MISSING,
+    titre_volontaire: sister ? 'Sœur' : 'Frère',
     salle: ctx.venueName || MISSING,
     assemblee: ctx.congregationName || 'toutes les assemblées',
     date: weekOnly ? `la ${formatWeekFr(ctx.eventDate)}` : formatDateFr(day),
@@ -124,7 +137,7 @@ export function renderMessage(template: string, ctx: MessageContext): string {
     travaux: renderWorks(ctx),
     taches: renderTaskDetails(ctx),
     consignes: renderInstructions(ctx),
-    questions: renderQuestions(ctx.questions),
+    questions: renderQuestions(ctx.questions, ctx.type === 'pre'),
   };
   return tpl
     .replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] : m))

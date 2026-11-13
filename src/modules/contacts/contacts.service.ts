@@ -21,7 +21,7 @@ export async function matchContact(name: string | null | undefined, phone: strin
   if (!cleanName && !e164) return { status: 'missing', contactId: null, candidates: [], reason: 'Aucun responsable indiqué' };
 
   if (e164) {
-    const byPhone = await ResponsibleContact.find({ phones: e164 }).lean();
+    const byPhone = await ResponsibleContact.find({ phones: e164, deletedAt: null }).lean();
     if (byPhone.length === 1) {
       return {
         status: 'matched',
@@ -34,7 +34,7 @@ export async function matchContact(name: string | null | undefined, phone: strin
   if (!cleanName) return { status: 'new', contactId: null, candidates: [], reason: 'Nom absent' };
 
   const key = normKey(cleanName);
-  const all = await ResponsibleContact.find({}, { fullName: 1, nameKey: 1, phones: 1 }).lean();
+  const all = await ResponsibleContact.find({ deletedAt: null }, { fullName: 1, nameKey: 1, phones: 1 }).lean();
   const exact = all.filter((c) => c.nameKey === key || nameSimilarity(c.fullName, cleanName) === 1);
   if (exact.length === 1) {
     const c = exact[0];

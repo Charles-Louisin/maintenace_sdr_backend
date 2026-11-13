@@ -21,21 +21,32 @@ dashboardRouter.get(
     const [upcoming, venues, scheduled, preTodo, postTodo, docsToReview, draftReports, unassigned, devices, prevMonth] = await Promise.all([
       WorkEvent.find({ status: 'scheduled', date: { $gte: today } })
         .sort({ date: 1 })
-        .limit(6)
+        .limit(12)
         .populate('venueId', 'name')
-        .select('date congregationName venueId tasks.label')
+        .select('date plannedDay congregationName venueId tasks.label')
         .lean(),
       Venue.countDocuments({ archived: false }),
       WorkEvent.countDocuments({ status: 'scheduled', date: { $gte: today } }),
       CallAssignment.countDocuments({ type: 'pre', status: { $in: ['planned', 'notified'] }, dueAt: { $lte: soon } }),
-      CallAssignment.countDocuments({ type: 'post', status: { $in: ['planned', 'notified'] }, dueAt: { $lte: new Date() } }),
+      CallAssignment.countDocuments({ type: 'post', status: { $in: ['planned', 'notified'] }, dueAt: { $lte: soon } }),
       ImportBatch.countDocuments({ status: 'review' }),
       IncomingReport.countDocuments({ status: 'draft' }),
       CallAssignment.countDocuments({ needsManualAssignment: true, status: { $in: ['planned', 'notified'] } }),
       PushDevice.countDocuments({ enabled: true }),
       previewMonth(prev.year, prev.month),
     ]);
-    const awaitingResponse = await CallAssignment.countDocuments({ status: { $in: ['message_sent', 'response_received'] } });
+    const [awaitingResponse, overdue, nextCalls] = await Promise.all([
+      CallAssignment.countDocuments({ status: { $in: ['message_sent', 'response_received'] } }),
+      CallAssignment.countDocuments({ status: { $in: ['planned', 'notified', 'message_sent', 'response_received'] }, dueAt: { $lt: new Date() } }),
+      // Prochains appels dont le rappel est programmé (fenêtre de 7 jours)
+      CallAssignment.find({ status: { $in: ['planned', 'notified'] }, dueAt: { $gte: new Date(), $lte: soon } })
+        .sort({ dueAt: 1 })
+        .limit(3)
+        .select('type status dueAt workEventId volunteerId')
+        .populate('volunteerId', 'fullName gender')
+        .populate({ path: 'workEventId', select: 'date plannedDay congregationName venueId status', populate: { path: 'venueId', select: 'name' } })
+        .lean(),
+    ]);
     res.json({
       upcoming,
       counts: {
@@ -47,7 +58,9 @@ dashboardRouter.get(
         responsesToValidate: draftReports,
         awaitingResponse,
         unassignedMissions: unassigned,
+        overdueMissions: overdue,
       },
+      nextCalls: nextCalls.filter((a) => a.workEventId && (a.workEventId as unknown as { status: string }).status !== 'cancelled'),
       previousMonthReport: {
         year: prev.year,
         month: prev.month,

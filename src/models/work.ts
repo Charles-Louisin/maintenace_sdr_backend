@@ -60,6 +60,8 @@ const workEventSchema = new Schema(
   { timestamps: true },
 );
 workEventSchema.index({ venueId: 1, date: 1 });
+workEventSchema.index({ responsibleContactId: 1 });
+workEventSchema.index({ status: 1, date: 1 });
 
 export const WorkEvent = model('WorkEvent', workEventSchema, 'work_events');
 
@@ -112,7 +114,7 @@ const callAssignmentSchema = new Schema(
     sentConfirmedAt: { type: Date, default: null },
     /** Chaque envoi confirmé (un renvoi à un autre volontaire ajoute une ligne) */
     sends: {
-      type: [{ at: { type: Date, default: Date.now }, volunteerId: { type: Schema.Types.ObjectId, ref: 'Volunteer' }, volunteerName: String, _id: false }],
+      type: [{ at: { type: Date, default: Date.now }, volunteerId: { type: Schema.Types.ObjectId, ref: 'Volunteer' }, volunteerName: String, volunteerGender: String, _id: false }],
       default: [],
     },
     /** Confirmation manuelle que la mission a été accomplie (distincte de l'envoi du message) */
@@ -129,6 +131,8 @@ const callAssignmentSchema = new Schema(
   { timestamps: true },
 );
 callAssignmentSchema.index({ workEventId: 1, type: 1 }, { unique: true });
+callAssignmentSchema.index({ volunteerId: 1, status: 1 });
+callAssignmentSchema.index({ status: 1, dueAt: 1 });
 
 export const CallAssignment = model('CallAssignment', callAssignmentSchema, 'call_assignments');
 
@@ -193,6 +197,8 @@ const incomingReportSchema = new Schema(
     status: { type: String, enum: ['draft', 'validated'], default: 'draft', index: true },
     validatedAt: { type: Date, default: null },
     versions: { type: [{ at: { type: Date, default: Date.now }, data: Schema.Types.Mixed, _id: false }], default: [] },
+    /** Bilan vide créé automatiquement quand la mission est marquée « non faite » */
+    autoEmpty: { type: Boolean, default: false },
   },
   { timestamps: true },
 );

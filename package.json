@@ -13,11 +13,14 @@
     "test": "vitest run",
     "owner:create": "tsx scripts/create-owner.ts",
     "owner:update": "tsx scripts/update-owner-login.ts",
-    "seed:demo": "tsx scripts/seed-demo.ts"
+    "owner:reset": "tsx scripts/owner-reset.ts",
+    "seed:demo": "tsx scripts/seed-demo.ts",
+    "dev:local": "tsx scripts/dev-local.ts"
   },
   "dependencies": {
     "@xmldom/xmldom": "^0.9.12",
     "argon2": "^0.45.2",
+    "compression": "^1.8.2",
     "cors": "^2.8.6",
     "dotenv": "^18.0.10",
     "exceljs": "^4.4.0",
@@ -38,6 +41,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",

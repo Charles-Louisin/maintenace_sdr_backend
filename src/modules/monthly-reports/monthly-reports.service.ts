@@ -92,15 +92,22 @@ export async function previewMonth(year: number, month: number) {
     const said = i.report!.answers.find((a) => a.reportField === 'monthly_maintenance' && /^oui/i.test(a.value));
     if (notDone && said) inconsistencies.push(`${i.venueName} (${i.congregationName}) ${formatShortFr(i.date)} : entretien déclaré effectué mais ${notDone} tâche(s) non réalisée(s)`);
   }
-  const template = await ReportTemplate.findOne({ active: true }).select('name mappingConfirmedAt').lean();
+  const template = await ReportTemplate.findOne({ active: true }).select('name mappingConfirmedAt mapping.columns').lean();
+  // Bilan sans aucune information utilisable (tout non renseigné / à vérifier) : pas de ligne dans le rapport
+  const cols = template?.mapping?.columns ?? [];
+  const hasData = (i: ReportItem) => !cols.length || rowHasData(cols, cols.map((c) => cellFor(c.sources ?? [], i)), (k) => k);
+  const written = included.filter(hasData);
+  const skipped = included.filter((i) => !hasData(i));
   return {
     year,
     month,
     monthLabel: monthLabelFr(year, month),
-    template,
+    template: template ? { _id: template._id, name: template.name, mappingConfirmedAt: template.mappingConfirmedAt } : null,
     totalEvents: items.length,
-    included: included.map(summary),
-    venues: [...new Set(included.map((i) => i.venueName))],
+    included: written.map(summary),
+    /** Bilans reçus mais sans aucune information utilisable : absents du rapport */
+    skippedEmpty: skipped.map(summary),
+    venues: [...new Set(written.map((i) => i.venueName))],
     questionnairesCompleted: included.filter((i) => i.report!.answers.every((a) => a.status === 'answered')).length,
     missingAnswers,
     expensesMissing: expensesMissing.map(summary),
@@ -117,12 +124,18 @@ function summary(i: ReportItem) {
 
 function answersFor(r: StructuredReport, field: string, emptyMeansNothing = true): string[] {
   return r.answers
-    .filter((a) => a.reportField === field && a.status !== 'missing' && a.value.trim())
-    .map((a) => {
-      const prefix = a.taskLabel ? `${a.taskLabel} : ` : '';
-      return `${prefix}${a.value.trim()}${a.status === 'to_verify' ? ' (à vérifier)' : ''}`;
-    })
+    // « Non renseigné » ou « à vérifier » : la case reste vide
+    .filter((a) => a.reportField === field && a.status === 'answered' && a.value.trim())
+    .map((a) => `${a.taskLabel ? `${a.taskLabel} : ` : ''}${a.value.trim()}`)
     .filter((x) => !emptyMeansNothing || x);
+}
+
+/** Sources qui décrivent l'intervention elle-même (toujours connues) : elles ne comptent pas comme un bilan. */
+const IDENTITY = new Set(['event.label', 'event.date', 'event.venue', 'event.congregation', 'event.tasks', 'volunteer']);
+
+/** Vrai si au moins une case de bilan de la ligne est remplie. */
+export function rowHasData(cols: { sources?: string[] | null }[], row: CellContent[], index: (i: number) => number) {
+  return cols.some((c, i) => (c.sources ?? []).some((x) => !IDENTITY.has(x)) && row[index(i)]?.lines.some((l) => l.trim()));
 }
 
 /** Valeur d'une colonne selon ses sources configurées. Rien n'est inventé : sans donnée, la cellule reste vide. */
@@ -145,7 +158,7 @@ export function cellFor(sources: string[], item: ReportItem, singleTask?: string
     } else if (!r) continue;
     else if (src.startsWith('answers:')) lines.push(...answersFor(r, src.slice(8)));
     else if (src === 'tasks.outcome') {
-      const ts = r.tasks.filter((t) => !singleTask || t.label === singleTask);
+      const ts = r.tasks.filter((t) => (!singleTask || t.label === singleTask) && t.outcome !== 'unknown');
       if (ts.length) lines.push(`Tâches de la semaine : ${ts.map((t) => `${t.label} (${OUTCOME_FR[t.outcome] ?? t.outcome})`).join(' ; ')}`);
     } else if (src === 'issues') {
       list = true;
@@ -211,6 +224,9 @@ export async function generateMonthly(year: number, month: number, acknowledgeIn
       return row;
     });
   } else rows = included.map((i) => makeRow(i));
+  // Semaine dont toutes les cases de bilan sont vides (non renseigné / à vérifier) : ligne retirée
+  rows = rows.filter((row) => rowHasData(cols, row, (i) => cols[i].index ?? 0));
+  if (!rows.length) throw badRequest('Aucune information de bilan à écrire ce mois-ci : toutes les réponses sont non renseignées ou à vérifier.');
 
   const templateBuffer = await getFile(src.storage);
   const { buffer, notes } = generateDocx(templateBuffer, {
@@ -225,7 +241,7 @@ export async function generateMonthly(year: number, month: number, acknowledgeIn
     titleText: preview.venues.length
       ? (m.titleTemplate ?? '').replace('{venues}', preview.venues.join(' & '))
       : undefined,
-    emptyValue: m.emptyValue ?? 'Non renseigné',
+    emptyValue: '', // information absente : case vide
   });
   const fileName = fileNameFor(year, month);
   const stored = await putFile(buffer, fileName, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');

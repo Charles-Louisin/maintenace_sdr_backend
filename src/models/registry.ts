@@ -41,6 +41,10 @@ const contactSchema = new Schema(
     venueIds: { type: [Schema.Types.ObjectId], ref: 'Venue', default: [] },
     congregationIds: { type: [Schema.Types.ObjectId], default: [] },
     notes: { type: String, default: '' },
+    /** Photo de profil (lien signé) */
+    image: { type: new Schema({ driver: String, key: String, mime: String, v: Number }, { _id: false }), default: null },
+    /** Suppression logique : la fiche disparaît de l'application, l'historique reste */
+    deletedAt: { type: Date, default: null },
     callLog: [
       {
         at: { type: Date, default: Date.now },
@@ -52,6 +56,7 @@ const contactSchema = new Schema(
   { timestamps: true },
 );
 contactSchema.index({ phones: 1 });
+contactSchema.index({ deletedAt: 1, fullName: 1 });
 
 export const ResponsibleContact = model('ResponsibleContact', contactSchema, 'responsible_contacts');
 
@@ -61,6 +66,10 @@ const volunteerSchema = new Schema(
     fullName: { type: String, required: true, trim: true },
     whatsapp: { type: String, required: true },
     active: { type: Boolean, default: true },
+    /** M = frère, F = sœur (titre utilisé dans les messages et l'application) */
+    gender: { type: String, enum: ['M', 'F'], default: 'M' },
+    /** Photo de profil (lien signé) */
+    image: { type: new Schema({ driver: String, key: String, mime: String, v: Number }, { _id: false }), default: null },
     skills: { type: [String], default: [] },
     notes: { type: String, default: '' },
     /** Disponibilités hebdomadaires : jour 1=lundi … 7=dimanche. Vide = toujours disponible. */

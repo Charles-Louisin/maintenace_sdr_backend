@@ -1,5 +1,6 @@
 import express, { Router } from 'express';
 import helmet from 'helmet';
+import compression from 'compression';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import { pinoHttp } from 'pino-http';
@@ -8,6 +9,7 @@ import { logger } from './lib/logger.js';
 import { errorHandler } from './middleware/error.js';
 import { requireOwner } from './middleware/auth.js';
 import { authRouter } from './modules/authentication/auth.routes.js';
+import { mailPublicRouter } from './modules/authentication/public-pages.js';
 import { venuesRouter } from './modules/venues/venues.routes.js';
 import { contactsRouter } from './modules/contacts/contacts.routes.js';
 import { volunteersRouter } from './modules/volunteers/volunteers.routes.js';
@@ -34,6 +36,8 @@ export function createApp() {
   app.use(helmet());
   const origins = env.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean);
   app.use(cors({ origin: origins.length ? origins : false }));
+  // Réponses JSON compressées : listes et détails arrivent plus vite sur le réseau mobile
+  app.use(compression({ threshold: 1024 }));
   app.use(express.json({ limit: '1mb' }));
   if (env.NODE_ENV !== 'test') app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/health' } }));
 
@@ -47,11 +51,12 @@ export function createApp() {
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
-  app.use('/api', rateLimit({ windowMs: 60_000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false }));
+  // Les images (liens signés, mises en cache) ne comptent pas dans la limite : une liste de salles ne bloque plus les enregistrements
+  app.use('/api/images', imagesRouter);
+  app.use('/api', rateLimit({ windowMs: 60_000, limit: 1200, standardHeaders: 'draft-8', legacyHeaders: false }));
   app.use('/api/auth', authRouter);
   app.use('/api/files', rateLimit({ windowMs: 60_000, limit: 60 }), filesRouter);
-  app.use('/api/images', imagesRouter);
-  app.use('/api/public', publicRouter);
+  app.use('/api/public', publicRouter, mailPublicRouter);
 
   // Toutes les autres routes : propriétaire authentifié uniquement
   const api = Router();

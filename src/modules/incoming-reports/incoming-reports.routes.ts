@@ -11,6 +11,7 @@ import { addDaysIso, todayIso } from '../../lib/dates.js';
 import { getSettings } from '../settings/settings.service.js';
 import { audit } from '../audit/audit.service.js';
 import { logger } from '../../lib/logger.js';
+import { finishAssignment } from '../call-assignments/completion.service.js';
 
 export const incomingReportsRouter = Router();
 
@@ -262,15 +263,11 @@ incomingReportsRouter.post(
     r.versions.push({ at: new Date(), data: { source: 'validated' } });
     await r.save();
 
+    // Bilan validé (avant ou après travaux) : la mission est accomplie et ses rappels s'arrêtent
     const a = await CallAssignment.findById(r.callAssignmentId);
-    if (a) {
-      a.status = r.type === 'post' ? 'completed' : 'response_received';
-      if (r.type === 'post') {
-        a.completedAt = new Date();
-        a.completionOutcome = 'done';
-      }
+    if (a && a.status !== 'cancelled') {
       a.history.push({ at: new Date(), action: 'report_validated', details: { reportId: r._id } });
-      await a.save();
+      await finishAssignment(a, 'done', '', r._id);
     }
     const e = await WorkEvent.findById(r.workEventId);
     if (e && r.type === 'post' && r.validated) {

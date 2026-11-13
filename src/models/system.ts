@@ -49,6 +49,8 @@ const notificationJobSchema = new Schema(
   { timestamps: true },
 );
 notificationJobSchema.index({ status: 1, dueAt: 1 });
+notificationJobSchema.index({ callAssignmentId: 1, status: 1 });
+notificationJobSchema.index({ workEventId: 1, status: 1 });
 export const NotificationJob = model('NotificationJob', notificationJobSchema, 'notification_jobs');
 
 const pushDeviceSchema = new Schema(

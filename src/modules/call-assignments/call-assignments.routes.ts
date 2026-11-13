@@ -11,6 +11,15 @@ import { autoAssign, regenerateMessage, computeRanking } from './call-assignment
 import { cancelJobs } from '../notifications/notifications.service.js';
 import { audit } from '../audit/audit.service.js';
 import { ensureOverdueReminders } from '../notifications/overdue.service.js';
+import { finishAssignment, reopenAssignment } from './completion.service.js';
+import { signImage, type StoredImage } from '../images/images.service.js';
+
+/** Volontaire affiché : titre (frère / sœur) et photo signée. */
+function volunteerView(v: unknown) {
+  if (!v || typeof v !== 'object') return v ?? null;
+  const { image, ...rest } = v as { _id: unknown; image?: StoredImage | null };
+  return { ...rest, imageUrl: signImage('volunteer', String(rest._id), image) };
+}
 
 export const callAssignmentsRouter = Router();
 
@@ -39,8 +48,8 @@ callAssignmentsRouter.get(
     const list = await CallAssignment.find(filter)
       .sort({ dueAt: scope === 'done' || scope === 'all' ? -1 : 1 })
       .limit(300)
-      .select('-recommendation.ranking -message.versions -history')
-      .populate('volunteerId', 'fullName whatsapp')
+      .select('-recommendation -message -questions -history')
+      .populate('volunteerId', 'fullName whatsapp gender image')
       .populate({
         path: 'workEventId',
         select: 'date congregationName venueId tasks.label status responsibleContactId',
@@ -50,7 +59,11 @@ callAssignmentsRouter.get(
         ],
       })
       .lean();
-    res.json(list.filter((a) => a.workEventId && (a.workEventId as unknown as { status: string }).status !== 'cancelled'));
+    res.json(
+      list
+        .filter((a) => a.workEventId && (a.workEventId as unknown as { status: string }).status !== 'cancelled')
+        .map((a) => ({ ...a, volunteerId: volunteerView(a.volunteerId) })),
+    );
   }),
 );
 
@@ -58,7 +71,7 @@ callAssignmentsRouter.get(
 callAssignmentsRouter.get(
   '/:id',
   ah(async (req, res) => {
-    const a = await CallAssignment.findById(param(req, 'id')).populate('volunteerId', 'fullName whatsapp').lean();
+    const a = await CallAssignment.findById(param(req, 'id')).select('-message.versions').populate('volunteerId', 'fullName whatsapp gender image').lean();
     if (!a) throw notFound('Mission');
     const event = await WorkEvent.findById(a.workEventId)
       .populate('venueId', 'name city')
@@ -66,15 +79,28 @@ callAssignmentsRouter.get(
       .populate('tasks.catalogEntryId', 'title frequency materials ppe products steps notes reference')
       .lean();
     const v = a.volunteerId as unknown as { whatsapp?: string } | null;
-    // Quand l’application prévient le propriétaire pour cette mission (échéance, puis retards)
-    await ensureOverdueReminders();
+    // Rappels de retard préparés en arrière-plan : l’écran ne les attend pas
+    void ensureOverdueReminders().catch(() => undefined);
     const reminders = await NotificationJob.find({ callAssignmentId: a._id, status: { $in: ['scheduled', 'sent', 'failed'] } })
       .sort({ dueAt: 1 })
       .select('kind dueAt status deliveryStatus')
       .limit(20)
       .lean();
+    // Explication toujours à jour (nom actuel du volontaire, choix manuel ou recommandation)
+    const vol = a.volunteerId as unknown as { _id: unknown; fullName?: string; gender?: string } | null;
+    const title = vol?.gender === 'F' ? 'Sœur' : 'Frère';
+    const mine = vol ? a.recommendation?.ranking?.find((r) => String(r.volunteerId) === String(vol._id)) : null;
+    const explanation = !vol
+      ? 'Aucun volontaire disponible : une attribution manuelle est nécessaire.'
+      : a.assignmentMode === 'manual'
+        ? `${title} ${vol.fullName} a été choisi${vol.gender === 'F' ? 'e' : ''} manuellement.`
+        : mine
+          ? `${title} ${vol.fullName} est recommandé${vol.gender === 'F' ? 'e' : ''} avec ${mine.score} points (score le plus élevé parmi les volontaires disponibles).`
+          : `${title} ${vol.fullName} est recommandé${vol.gender === 'F' ? 'e' : ''}.`;
     res.json({
       ...a,
+      volunteerId: volunteerView(a.volunteerId),
+      recommendation: a.recommendation ? { ...a.recommendation, explanation } : { explanation },
       reminders,
       event,
       whatsappUrl: v?.whatsapp && a.message?.text ? whatsappLink(v.whatsapp, a.message.text) : null,
@@ -177,8 +203,8 @@ callAssignmentsRouter.post(
     if (a.status === 'completed') throw badRequest('Mission déjà accomplie');
     a.status = 'message_sent';
     a.sentConfirmedAt = new Date();
-    const vol = await Volunteer.findById(a.volunteerId).select('fullName').lean();
-    a.sends.push({ at: a.sentConfirmedAt, volunteerId: a.volunteerId, volunteerName: vol?.fullName ?? '' });
+    const vol = await Volunteer.findById(a.volunteerId).select('fullName gender').lean();
+    a.sends.push({ at: a.sentConfirmedAt, volunteerId: a.volunteerId, volunteerName: vol?.fullName ?? '', volunteerGender: vol?.gender ?? 'M' });
     a.history.push({ at: new Date(), action: 'message_sent_confirmed', details: { text: a.message?.text } });
     await a.save();
     await cancelJobs({ callAssignmentId: a._id });
@@ -223,13 +249,7 @@ callAssignmentsRouter.post(
     const a = await CallAssignment.findById(param(req, 'id'));
     if (!a) throw notFound('Mission');
     if (a.status === 'cancelled') throw badRequest('Mission annulée');
-    a.status = 'completed';
-    a.completedAt = new Date();
-    a.completionOutcome = outcome;
-    a.completionNote = note?.trim() ?? '';
-    a.history.push({ at: a.completedAt, action: outcome === 'done' ? 'completed_done' : 'completed_not_done', details: { note: a.completionNote } });
-    await a.save();
-    await cancelJobs({ callAssignmentId: a._id });
+    await finishAssignment(a, outcome, note ?? '');
     await audit('complete', 'call_assignment', a._id, { outcome });
     res.json(a);
   }),
@@ -242,12 +262,7 @@ callAssignmentsRouter.post(
     const a = await CallAssignment.findById(param(req, 'id'));
     if (!a) throw notFound('Mission');
     if (a.status !== 'completed') throw badRequest('Cette mission n’est pas terminée');
-    a.status = a.sentConfirmedAt ? 'message_sent' : 'notified';
-    a.completedAt = null;
-    a.completionOutcome = null;
-    a.history.push({ at: new Date(), action: 'completion_undone' });
-    await a.save();
-    await ensureOverdueReminders(new Date(), { force: true });
+    await reopenAssignment(a);
     res.json(a);
   }),
 );

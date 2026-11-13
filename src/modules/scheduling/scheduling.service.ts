@@ -14,16 +14,17 @@ export function computeDueDates(
   week?: { plannedDay: string | null } | null,
 ) {
   const pre = zonedDateTime(addDaysIso(eventDate, -s.preCallDaysBefore), s.preCallTime, s.timezone);
-  // Semaine : suivi le soir du jour donné par le responsable, sinon le dimanche soir de la semaine
-  if (week) {
-    const day = week.plannedDay ?? weekBounds(eventDate).end;
-    return { pre, post: zonedDateTime(day, s.postCallSameEveningTime, s.timezone) };
+  // Semaine : sans jour donné par le responsable, le suivi a lieu le lendemain de la fin de semaine (lundi matin) ;
+  // avec un jour donné (ou déplacé), il suit ce jour-là comme une intervention ordinaire.
+  if (week && !week.plannedDay) {
+    return { pre, post: zonedDateTime(addDaysIso(weekBounds(eventDate).end, 1), s.postCallNextMorningTime, s.timezone) };
   }
+  const day = week?.plannedDay ?? eventDate;
   const mode = postOverride ?? s.postCallMode;
   const post =
     mode === 'same_evening'
-      ? zonedDateTime(eventDate, s.postCallSameEveningTime, s.timezone)
-      : zonedDateTime(addDaysIso(eventDate, 1), s.postCallNextMorningTime, s.timezone);
+      ? zonedDateTime(day, s.postCallSameEveningTime, s.timezone)
+      : zonedDateTime(addDaysIso(day, 1), s.postCallNextMorningTime, s.timezone);
   return { pre, post };
 }
 

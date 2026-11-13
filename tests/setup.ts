@@ -10,3 +10,4 @@ process.env.STORAGE_DRIVER = 'local';
 process.env.LOCAL_STORAGE_DIR = path.join(os.tmpdir(), `sdr-test-${process.pid}`);
 process.env.OPENROUTER_API_KEY = '';
 process.env.PUBLIC_BASE_URL = 'http://test.local';
+process.env.RESEND_API_KEY = ''; // aucun e-mail réel pendant les tests

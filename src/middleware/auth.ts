@@ -10,6 +10,12 @@ declare module 'express-serve-static-core' {
   }
 }
 
+/** Compte vérifié récemment : évite une lecture en base à chaque requête (30 s). */
+const ownerCache = new Map<string, { changedAt: number | null; at: number }>();
+export function forgetOwnerCache() {
+  ownerCache.clear();
+}
+
 /** Toutes les routes métier passent par ce middleware : seul le propriétaire est autorisé. */
 export async function requireOwner(req: Request, _res: Response, next: NextFunction) {
   try {
@@ -23,10 +29,18 @@ export async function requireOwner(req: Request, _res: Response, next: NextFunct
       throw unauthorized('Session expirée');
     }
     if (payload.typ !== 'access' || !payload.sub) throw unauthorized();
-    const owner = await OwnerAccount.findById(payload.sub).select('passwordChangedAt').lean();
-    if (!owner) throw unauthorized();
+    let cached = ownerCache.get(payload.sub);
+    if (!cached || Date.now() - cached.at > 30_000) {
+      const owner = await OwnerAccount.findById(payload.sub).select('passwordChangedAt').lean();
+      if (!owner) {
+        ownerCache.delete(payload.sub);
+        throw unauthorized();
+      }
+      cached = { changedAt: owner.passwordChangedAt ? owner.passwordChangedAt.getTime() : null, at: Date.now() };
+      ownerCache.set(payload.sub, cached);
+    }
     // Jeton émis avant un changement de mot de passe -> refusé
-    if (payload.iat && owner.passwordChangedAt && payload.iat * 1000 < owner.passwordChangedAt.getTime() - 1000) {
+    if (payload.iat && cached.changedAt && payload.iat * 1000 < cached.changedAt - 1000) {
       throw unauthorized('Session expirée');
     }
     req.ownerId = String(payload.sub);

@@ -1,7 +1,7 @@
 /**
  * Valeurs par défaut modifiables depuis l'application (Paramètres).
  * Variables disponibles dans les modèles de messages :
- * {volontaire} {salle} {assemblee} {date} {date_relative} {responsable} {telephone_responsable}
+ * {volontaire} {titre_volontaire} {salle} {assemblee} {date} {date_relative} {responsable} {telephone_responsable}
  * {travaux} {taches} {consignes} {consignes_semaine} {questions}
  */
 export const DEFAULT_PRE_TEMPLATE = `Bonjour Frère {volontaire},
@@ -16,6 +16,9 @@ Travaux concernés :
 Tâches à réaliser :
 {taches}
 {consignes}{consignes_semaine}
+Merci de lui poser aussi ces questions et de me transmettre ses réponses :
+{questions}
+
 Merci de bien vouloir nous faire un retour après ton échange.`;
 
 export const DEFAULT_POST_TEMPLATE = `Bonjour Frère {volontaire},

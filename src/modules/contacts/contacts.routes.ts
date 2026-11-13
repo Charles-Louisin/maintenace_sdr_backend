@@ -9,6 +9,9 @@ import { notFound, badRequest } from '../../lib/errors.js';
 import { audit } from '../audit/audit.service.js';
 import { regenerateMessage } from '../call-assignments/call-assignments.service.js';
 import { matchContact } from './contacts.service.js';
+import { signImage, type StoredImage } from '../images/images.service.js';
+
+const withImage = <T extends { _id: unknown; image?: unknown }>({ image, ...c }: T) => ({ ...c, imageUrl: signImage('contact', String(c._id), image as StoredImage | null) });
 
 export const contactsRouter = Router();
 
@@ -46,8 +49,10 @@ contactsRouter.get(
   '/',
   ah(async (req, res) => {
     const q = qstr(req, 'q');
-    const filter = q ? { nameKey: { $regex: normKey(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') } } : {};
-    res.json(await ResponsibleContact.find(filter).sort({ fullName: 1 }).limit(500).lean());
+    const filter: Record<string, unknown> = { deletedAt: null };
+    if (q) filter.nameKey = { $regex: normKey(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') };
+    const list = await ResponsibleContact.find(filter).select('-callLog').sort({ fullName: 1 }).limit(500).lean();
+    res.json(list.map(withImage));
   }),
 );
 
@@ -65,7 +70,7 @@ contactsRouter.post(
     const phones = normalizePhones(body.phones) ?? [];
     const c = await ResponsibleContact.create({ ...body, phones, whatsappPhones: normalizeWhatsapp(body.whatsappPhones, phones), nameKey: normKey(body.fullName) });
     await audit('create', 'contact', c._id);
-    res.status(201).json(c);
+    res.status(201).json(withImage(c.toObject()));
   }),
 );
 
@@ -74,8 +79,12 @@ contactsRouter.get(
   ah(async (req, res) => {
     const c = await ResponsibleContact.findById(param(req, 'id')).lean();
     if (!c) throw notFound('Contact');
-    const events = await WorkEvent.find({ responsibleContactId: c._id }).sort({ date: -1 }).limit(100).lean();
-    res.json({ ...c, events });
+    const events = await WorkEvent.find({ responsibleContactId: c._id })
+      .sort({ date: -1 })
+      .limit(100)
+      .select('date congregationName venueId status tasks.label')
+      .lean();
+    res.json({ ...withImage(c), events });
   }),
 );
 
@@ -98,25 +107,33 @@ contactsRouter.patch(
     if (body.fullName || body.phones || body.whatsappPhones !== undefined) {
       const eventIds = (await WorkEvent.find({ responsibleContactId: c._id }).select('_id').lean()).map((e) => e._id);
       const pending = await CallAssignment.find({ workEventId: { $in: eventIds }, status: { $in: ['planned', 'notified'] } });
-      for (const a of pending) {
+      await Promise.all(pending.map(async (a) => {
         await regenerateMessage(a, { keepEdited: true });
         await a.save();
-      }
+      }));
     }
     await audit('update', 'contact', c._id, { fields: Object.keys(body) });
-    res.json(c);
+    res.json(withImage(c.toObject()));
   }),
 );
 
+/**
+ * Suppression : la fiche disparaît de l'application (listes, choix du responsable),
+ * mais ses données restent en base pour l'historique des interventions.
+ */
 contactsRouter.delete(
   '/:id',
   ah(async (req, res) => {
     const id = param(req, 'id');
-    if (await WorkEvent.exists({ responsibleContactId: id })) {
-      throw badRequest('Ce contact est lié à des interventions : modifiez-le plutôt que de le supprimer.');
+    const linked = await WorkEvent.exists({ responsibleContactId: id });
+    if (linked) {
+      const r = await ResponsibleContact.updateOne({ _id: id, deletedAt: null }, { deletedAt: new Date() });
+      if (!r.matchedCount) throw notFound('Contact');
+      await audit('soft_delete', 'contact', id);
+      return res.json({ deleted: true, historyKept: true });
     }
     await ResponsibleContact.deleteOne({ _id: id });
     await audit('delete', 'contact', id);
-    res.json({ deleted: true });
+    res.json({ deleted: true, historyKept: false });
   }),
 );

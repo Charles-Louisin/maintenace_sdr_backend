@@ -1,7 +1,7 @@
 /**
- * Création du compte UNIQUE du propriétaire (aucune inscription publique n'existe).
+ * Création du compte UNIQUE du propriétaire (sans passer par l’inscription de l’application).
  * Usage interactif :  npm run owner:create
- * Le code de récupération affiché à la fin permet de réinitialiser le mot de passe : conservez-le hors du téléphone.
+ * En cas d’oubli du mot de passe : « Mot de passe oublié » envoie un code par e-mail.
  */
 import readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
@@ -19,10 +19,8 @@ async function main() {
   rl.close();
   await connectDb(env.MONGODB_URI);
   await ensureDefaults();
-  const { recoveryCode } = await createOwner({ email, displayName, phone, password });
+  await createOwner({ email, displayName, phone, password });
   console.log('\nCompte propriétaire créé.');
-  console.log('CODE DE RÉCUPÉRATION (à conserver en lieu sûr, il ne sera plus affiché) :');
-  console.log(`\n    ${recoveryCode}\n`);
   await disconnectDb();
 }
 

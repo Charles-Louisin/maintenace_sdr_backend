@@ -4,26 +4,18 @@ import jwt from 'jsonwebtoken';
 import { env } from '../../config/env.js';
 import { OwnerAccount } from '../../models/owner.js';
 import { AppError, unauthorized, conflict } from '../../lib/errors.js';
+import { forgetOwnerCache } from '../../middleware/auth.js';
+import { CODE_TTL_MINUTES, checkCode, issueCode, sendCode, type StoredCode } from './email-code.js';
 
 const ARGON = { type: argon2.argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 } as const;
 const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
+/** Une inscription en attente de code bloque l’adresse pendant ce délai (évite qu’un tiers la remplace). */
+const PENDING_SIGNUP_MINUTES = 30;
 
 export const hashSecret = (s: string) => argon2.hash(s, ARGON);
 export const verifyPassword = (hash: string, password: string) => argon2.verify(hash, password).catch(() => false);
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
-
-export function generateRecoveryCode(): string {
-  // 4 groupes de 5 caractères lisibles, ex. K7Q2M-...
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = crypto.randomBytes(20);
-  let out = '';
-  for (let i = 0; i < 20; i++) {
-    out += alphabet[bytes[i] % alphabet.length];
-    if (i % 5 === 4 && i < 19) out += '-';
-  }
-  return out;
-}
 
 export function validatePasswordStrength(pw: string) {
   if (pw.length < 10) throw new AppError(400, 'WEAK_PASSWORD', 'Le mot de passe doit contenir au moins 10 caractères');
@@ -32,20 +24,26 @@ export function validatePasswordStrength(pw: string) {
   }
 }
 
-/** Création du compte unique. Refuse s'il en existe déjà un. */
+/** Création du compte unique par le script d’administration (adresse considérée comme vérifiée). */
 export async function createOwner(input: { email: string; displayName: string; phone?: string; password: string }) {
   validatePasswordStrength(input.password);
   if (await OwnerAccount.exists({})) throw conflict('Le compte propriétaire existe déjà');
-  const recoveryCode = generateRecoveryCode();
   const owner = await OwnerAccount.create({
     email: input.email,
     displayName: input.displayName,
     phone: input.phone ?? '',
     passwordHash: await hashSecret(input.password),
-    recoveryCodeHash: await hashSecret(recoveryCode),
+    emailVerified: true,
   });
-  return { owner, recoveryCode };
+  return { owner };
 }
+
+const ownerSummary = (o: { _id: unknown; email: string; displayName: string; phone?: string | null }) => ({
+  id: String(o._id),
+  email: o.email,
+  displayName: o.displayName,
+  phone: o.phone ?? '',
+});
 
 function signAccess(ownerId: string) {
   return jwt.sign({ typ: 'access' }, env.JWT_ACCESS_SECRET, {
@@ -68,6 +66,129 @@ async function issueTokens(ownerId: string, device = '') {
   );
   return { accessToken: signAccess(ownerId), refreshToken, refreshExpiresAt: expiresAt.toISOString() };
 }
+
+/* ───────────── Inscription (un seul compte) et codes reçus par e-mail ───────────── */
+
+type OwnerDocument = NonNullable<Awaited<ReturnType<typeof OwnerAccount.findOne>>>;
+
+/** L’inscription n’est possible que tant qu’aucun compte vérifié n’existe. */
+export async function registrationOpen() {
+  return !(await OwnerAccount.exists({ emailVerified: { $ne: false } }));
+}
+
+async function sendNewCode(owner: OwnerDocument, purpose: StoredCode['purpose'], email: string) {
+  const { code, stored } = issueCode(purpose, email, owner.emailCode as StoredCode | null);
+  owner.set('emailCode', stored);
+  await owner.save();
+  await sendCode(purpose, email, code, owner.displayName);
+  return { email, expiresInMinutes: CODE_TTL_MINUTES };
+}
+
+/** Vérifie le code ; compte l’essai manqué et indique les essais restants. */
+async function consumeCode(owner: OwnerDocument, purpose: StoredCode['purpose'], email: string, code: string) {
+  const r = checkCode(owner.emailCode as StoredCode | null, purpose, email, code);
+  if (!r.ok) {
+    owner.set('emailCode', r.next);
+    await owner.save();
+    const s = r.left > 1 ? 's' : '';
+    throw new AppError(400, 'BAD_CODE', r.left > 0 ? `Code incorrect (${r.left} essai${s} restant${s})` : 'Code incorrect : demandez un nouveau code');
+  }
+  owner.set('emailCode', null);
+}
+
+export async function register(input: { email: string; displayName: string; password: string }) {
+  validatePasswordStrength(input.password);
+  const email = input.email.toLowerCase().trim();
+  const existing = await OwnerAccount.findOne({});
+  if (existing) {
+    if (existing.emailVerified !== false) throw conflict('Le compte existe déjà : connectez-vous.');
+    const recent = Date.now() - new Date(existing.get('createdAt') as Date).getTime() < PENDING_SIGNUP_MINUTES * 60_000;
+    if (existing.email !== email && recent) throw conflict('Une inscription est déjà en attente de vérification. Réessayez plus tard.');
+    await OwnerAccount.deleteOne({ _id: existing._id });
+  }
+  const owner = await OwnerAccount.create({
+    email,
+    displayName: input.displayName.trim(),
+    passwordHash: await hashSecret(input.password),
+    emailVerified: false,
+  });
+  forgetOwnerCache();
+  return sendNewCode(owner, 'verify', email);
+}
+
+/** Renvoi du code de vérification (réponse identique que l’adresse existe ou non). */
+export async function resendVerification(email: string) {
+  const owner = await OwnerAccount.findOne({ email: email.toLowerCase().trim(), emailVerified: false });
+  if (owner) await sendNewCode(owner, 'verify', owner.email);
+  return { expiresInMinutes: CODE_TTL_MINUTES };
+}
+
+/** Confirme l’adresse puis ouvre la session. */
+export async function verifyEmail(email: string, code: string, device = '') {
+  const owner = await OwnerAccount.findOne({ email: email.toLowerCase().trim() });
+  if (!owner) throw new AppError(400, 'NO_CODE', 'Aucun code en cours : demandez-en un nouveau');
+  if (owner.emailVerified !== false) throw new AppError(400, 'ALREADY_VERIFIED', 'Adresse déjà vérifiée : connectez-vous.');
+  await consumeCode(owner, 'verify', owner.email, code);
+  owner.emailVerified = true;
+  await owner.save();
+  forgetOwnerCache();
+  return { ...(await issueTokens(String(owner._id), device)), owner: ownerSummary(owner) };
+}
+
+/** Mot de passe oublié : un code est envoyé si l’adresse est celle du compte (réponse identique sinon). */
+export async function forgotPassword(email: string) {
+  const owner = await OwnerAccount.findOne({ email: email.toLowerCase().trim() });
+  if (owner) {
+    try {
+      await sendNewCode(owner, 'reset', owner.email);
+    } catch (e) {
+      // Renvoi trop rapproché : on ne révèle pas l’existence du compte, le code précédent reste valable
+      if (!(e instanceof AppError && e.code === 'CODE_COOLDOWN')) throw e;
+    }
+  }
+  return { expiresInMinutes: CODE_TTL_MINUTES };
+}
+
+/** Nouveau mot de passe avec le code reçu : sessions et clés d’empreinte révoquées, puis la session s’ouvre. */
+export async function resetPassword(email: string, code: string, newPassword: string, device = '') {
+  validatePasswordStrength(newPassword);
+  const owner = await OwnerAccount.findOne({ email: email.toLowerCase().trim() });
+  if (!owner) throw new AppError(400, 'NO_CODE', 'Aucun code en cours : demandez-en un nouveau');
+  await consumeCode(owner, 'reset', owner.email, code);
+  owner.passwordHash = await hashSecret(newPassword);
+  owner.passwordChangedAt = new Date();
+  owner.emailVerified = true;
+  owner.failedLogins = 0;
+  owner.lockedUntil = null;
+  owner.set('refreshTokens', []);
+  owner.set('biometricKeys', []);
+  await owner.save();
+  forgetOwnerCache();
+  return { ...(await issueTokens(String(owner._id), device)), owner: ownerSummary(owner) };
+}
+
+/** Changement d’adresse : le code part vers la NOUVELLE adresse, qui ne remplace l’ancienne qu’après confirmation. */
+export async function requestEmailChange(ownerId: string, newEmail: string) {
+  const owner = await OwnerAccount.findById(ownerId);
+  if (!owner) throw unauthorized();
+  const email = newEmail.toLowerCase().trim();
+  owner.pendingEmail = email;
+  return sendNewCode(owner, 'email_change', email);
+}
+
+export async function confirmEmailChange(ownerId: string, code: string) {
+  const owner = await OwnerAccount.findById(ownerId);
+  if (!owner || !owner.pendingEmail) throw new AppError(400, 'NO_CODE', 'Aucun changement d’adresse en cours');
+  await consumeCode(owner, 'email_change', owner.pendingEmail, code);
+  owner.email = owner.pendingEmail;
+  owner.pendingEmail = '';
+  owner.emailVerified = true;
+  await owner.save();
+  forgetOwnerCache();
+  return owner;
+}
+
+/* ───────────── Connexion ───────────── */
 
 export async function login(email: string, password: string, device = '') {
   const owner = await OwnerAccount.findOne({ email: email.toLowerCase().trim() });
@@ -93,10 +214,14 @@ export async function login(email: string, password: string, device = '') {
   owner.failedLogins = 0;
   owner.lockedUntil = null;
   await owner.save();
-  return {
-    ...(await issueTokens(String(owner._id), device)),
-    owner: { id: String(owner._id), email: owner.email, displayName: owner.displayName, phone: owner.phone },
-  };
+  // Adresse jamais confirmée : un code est (r)envoyé et la connexion attend la vérification
+  if (owner.emailVerified === false) {
+    await sendNewCode(owner, 'verify', owner.email).catch((e) => {
+      if (!(e instanceof AppError && e.code === 'CODE_COOLDOWN')) throw e;
+    });
+    throw new AppError(403, 'EMAIL_NOT_VERIFIED', 'Adresse e-mail non vérifiée : saisissez le code reçu par e-mail.', { email: owner.email });
+  }
+  return { ...(await issueTokens(String(owner._id), device)), owner: ownerSummary(owner) };
 }
 
 /** Rotation : l'ancien jeton de renouvellement est invalidé à chaque usage. */
@@ -121,37 +246,6 @@ export async function logout(refreshToken: string | undefined) {
   await OwnerAccount.updateOne({}, { $pull: { refreshTokens: { tokenId } } });
 }
 
-/**
- * Mot de passe oublié : l'application n'a qu'un utilisateur et aucun service d'e-mail.
- * La réinitialisation exige le code de récupération remis à la création du compte ; un nouveau code est alors émis.
- */
-export async function resetWithRecoveryCode(email: string, recoveryCode: string, newPassword: string) {
-  validatePasswordStrength(newPassword);
-  const owner = await OwnerAccount.findOne({ email: email.toLowerCase().trim() });
-  const fail = () => unauthorized('Informations de récupération incorrectes');
-  if (!owner) throw fail();
-  if (owner.lockedUntil && owner.lockedUntil > new Date()) {
-    throw new AppError(423, 'LOCKED', 'Trop de tentatives. Réessayez plus tard.');
-  }
-  const ok = await argon2.verify(owner.recoveryCodeHash, recoveryCode.trim().toUpperCase());
-  if (!ok) {
-    owner.failedLogins += 1;
-    if (owner.failedLogins >= MAX_FAILED) owner.lockedUntil = new Date(Date.now() + LOCK_MINUTES * 60000);
-    await owner.save();
-    throw fail();
-  }
-  const newCode = generateRecoveryCode();
-  owner.passwordHash = await hashSecret(newPassword);
-  owner.recoveryCodeHash = await hashSecret(newCode);
-  owner.passwordChangedAt = new Date();
-  owner.failedLogins = 0;
-  owner.lockedUntil = null;
-  owner.set('refreshTokens', []);
-  owner.set('biometricKeys', []);
-  await owner.save();
-  return { newRecoveryCode: newCode };
-}
-
 export async function changePassword(ownerId: string, current: string, next: string) {
   validatePasswordStrength(next);
   const owner = await OwnerAccount.findById(ownerId);
@@ -161,6 +255,7 @@ export async function changePassword(ownerId: string, current: string, next: str
   owner.set('refreshTokens', []);
   owner.set('biometricKeys', []);
   await owner.save();
+  forgetOwnerCache();
 }
 
 /* ───────────── Connexion par empreinte / Face ID (survit à la déconnexion) ───────────── */
@@ -186,10 +281,7 @@ export async function loginWithBiometric(keyId: string, secret: string, device =
   const ok = entry && crypto.timingSafeEqual(Buffer.from(entry.secretHash), Buffer.from(sha256(secret)));
   if (!ok) throw fail();
   await OwnerAccount.updateOne({ _id: owner._id, 'biometricKeys.keyId': keyId }, { $set: { 'biometricKeys.$.lastUsedAt': new Date() } });
-  return {
-    ...(await issueTokens(String(owner._id), device)),
-    owner: { id: String(owner._id), email: owner.email, displayName: owner.displayName, phone: owner.phone },
-  };
+  return { ...(await issueTokens(String(owner._id), device)), owner: ownerSummary(owner) };
 }
 
 export async function revokeBiometric(ownerId: string, keyId: string) {

@@ -12,21 +12,51 @@ import { cancelJobs } from '../notifications/notifications.service.js';
 
 type AssignmentDoc = InstanceType<typeof CallAssignment>;
 
-export async function computeRanking(a: AssignmentDoc): Promise<RankedVolunteer[]> {
+type MissionLite = { _id: unknown; volunteerId: unknown; dueAt: Date; workEventId: unknown; type: string };
+
+/**
+ * Données communes à plusieurs calculs de classement (chargées une seule fois pour une série :
+ * nouveau volontaire, réattribution…). Les missions sont tenues à jour en mémoire au fil des choix.
+ */
+export interface RankingData {
+  volunteers: Awaited<ReturnType<typeof loadVolunteers>>;
+  missions: MissionLite[];
+  events: Map<string, { tasks: { label: string; category?: string | null }[] }>;
+}
+const loadVolunteers = () => Volunteer.find({ deletedAt: null }).lean();
+
+export async function loadRankingData(eventIds: unknown[]): Promise<RankingData> {
+  const [volunteers, missions, events] = await Promise.all([
+    loadVolunteers(),
+    CallAssignment.find({ volunteerId: { $ne: null }, status: { $ne: 'cancelled' } })
+      .select('volunteerId dueAt workEventId type')
+      .lean(),
+    WorkEvent.find({ _id: { $in: eventIds } })
+      .select('tasks.label tasks.category')
+      .lean(),
+  ]);
+  return { volunteers, missions: missions as MissionLite[], events: new Map(events.map((e) => [String(e._id), e as never])) };
+}
+
+/** Met à jour le volontaire d'une mission dans les données préchargées. */
+function noteAssignment(data: RankingData | undefined, a: AssignmentDoc) {
+  if (!data) return;
+  data.missions = data.missions.filter((m) => String(m._id) !== String(a._id));
+  if (a.volunteerId) data.missions.push({ _id: a._id, volunteerId: a.volunteerId, dueAt: a.dueAt, workEventId: a.workEventId, type: a.type });
+}
+
+export async function computeRanking(a: AssignmentDoc, data?: RankingData): Promise<RankedVolunteer[]> {
   const s = await getSettings();
-  const event = await WorkEvent.findById(a.workEventId).lean();
+  const event = data?.events.get(String(a.workEventId)) ?? (await WorkEvent.findById(a.workEventId).select('tasks.label tasks.category').lean());
   if (!event) throw notFound('Intervention');
-  const volunteers = await Volunteer.find({ deletedAt: null }).lean();
-  const missions = await CallAssignment.find({
-    volunteerId: { $ne: null },
-    status: { $ne: 'cancelled' },
-    _id: { $ne: a._id },
-  })
-    .select('volunteerId dueAt workEventId type')
-    .lean();
-  const other = await CallAssignment.findOne({ workEventId: a.workEventId, type: a.type === 'pre' ? 'post' : 'pre' })
-    .select('volunteerId')
-    .lean();
+  const volunteers = data?.volunteers ?? (await loadVolunteers());
+  const all: MissionLite[] =
+    data?.missions ??
+    ((await CallAssignment.find({ volunteerId: { $ne: null }, status: { $ne: 'cancelled' } })
+      .select('volunteerId dueAt workEventId type')
+      .lean()) as MissionLite[]);
+  const missions = all.filter((m) => String(m._id) !== String(a._id));
+  const other = all.find((m) => String(m.workEventId) === String(a.workEventId) && m.type !== a.type) ?? null;
   return rankVolunteers(
     volunteers.map((v) => ({
       id: String(v._id),
@@ -55,9 +85,9 @@ export async function computeRanking(a: AssignmentDoc): Promise<RankedVolunteer[
 }
 
 /** Recalcule la recommandation ; n'écrase jamais un choix manuel sauf si `force`. */
-export async function autoAssign(a: AssignmentDoc, opts: { force?: boolean } = {}) {
+export async function autoAssign(a: AssignmentDoc, opts: { force?: boolean; data?: RankingData } = {}) {
   if (a.assignmentMode === 'manual' && !opts.force) return a;
-  const ranking = await computeRanking(a);
+  const ranking = await computeRanking(a, opts.data);
   const best = pickBest(ranking);
   a.set('recommendation', {
     computedAt: new Date(),
@@ -70,6 +100,7 @@ export async function autoAssign(a: AssignmentDoc, opts: { force?: boolean } = {
   a.assignmentMode = best ? 'auto' : 'none';
   a.needsManualAssignment = !best;
   a.history.push({ at: new Date(), action: 'auto_assign', details: { volunteer: best?.fullName ?? null } });
+  noteAssignment(opts.data, a);
   return a;
 }
 
@@ -90,10 +121,12 @@ async function buildMessageData(a: AssignmentDoc): Promise<{ ctx: MessageContext
   const catalogIds = event.tasks.map((t) => t.catalogEntryId).filter(Boolean);
   const catalog = await TaskCatalogEntry.find({ _id: { $in: catalogIds } }).lean();
   const byId = new Map(catalog.map((c) => [String(c._id), c]));
-  const questions = a.type === 'post' ? await resolveQuestions('post', event.tasks) : [];
+  // Questionnaire avant ou après travaux, selon le type d'appel
+  const questions = await resolveQuestions(a.type as 'pre' | 'post', event.tasks);
   const ctx: MessageContext = {
     type: a.type as 'pre' | 'post',
     volunteerName: volunteer?.fullName ?? null,
+    volunteerGender: (volunteer as { gender?: string } | null)?.gender === 'F' ? 'F' : 'M',
     venueName: venue?.name ?? '',
     congregationName: event.congregationName,
     eventDate: event.date,
@@ -127,7 +160,7 @@ export async function regenerateMessage(a: AssignmentDoc, opts: { keepEdited?: b
   const { ctx, questions } = await buildMessageData(a);
   const template = a.type === 'pre' ? s.messageTemplates!.pre! : s.messageTemplates!.post!;
   const text = renderMessage(template, ctx);
-  if (a.type === 'post') a.set('questions', questions);
+  a.set('questions', questions);
   if (a.message?.text && a.message.text !== text) {
     a.message.versions.push({ text: a.message.text, at: new Date(), source: a.message.edited ? 'edited' : 'generated' });
   }
@@ -143,13 +176,15 @@ export async function reassignFutureOf(volunteerId: string): Promise<number> {
     status: { $in: ['planned', 'notified'] },
     dueAt: { $gte: new Date(Date.now() - 86400000) },
   });
+  if (!list.length) return 0;
+  const data = await loadRankingData(list.map((a) => a.workEventId));
+  const v = await Volunteer.findById(volunteerId).lean();
   let n = 0;
   for (const a of list) {
-    const v = await Volunteer.findById(volunteerId).lean();
-    const ranking = await computeRanking(a);
+    const ranking = await computeRanking(a, data);
     const me = ranking.find((r) => r.volunteerId === volunteerId);
     if (v && !v.deletedAt && me?.eligible) continue;
-    await autoAssign(a, { force: true });
+    await autoAssign(a, { force: true, data });
     await regenerateMessage(a);
     await a.save();
     n++;
@@ -172,9 +207,11 @@ export async function rebalanceFuture(): Promise<{ filled: number; moved: number
   }).sort({ dueAt: 1 });
   let filled = 0;
   let moved = 0;
+  if (!list.length) return { filled, moved };
+  const data = await loadRankingData(list.map((a) => a.workEventId));
   for (const a of list) {
     const before = a.volunteerId ? String(a.volunteerId) : null;
-    await autoAssign(a, { force: !before });
+    await autoAssign(a, { force: !before, data });
     const after = a.volunteerId ? String(a.volunteerId) : null;
     if (after === before) continue;
     await regenerateMessage(a, { keepEdited: true });
@@ -185,4 +222,35 @@ export async function rebalanceFuture(): Promise<{ filled: number; moved: number
     } else moved++;
   }
   return { filled, moved };
+}
+
+/** Nom ou titre d'un volontaire modifié : ses messages pas encore envoyés sont régénérés (sauf texte retouché). */
+export async function refreshMessagesOf(volunteerId: string) {
+  const list = await CallAssignment.find({ volunteerId, status: { $in: ['planned', 'notified'] } });
+  await Promise.all(
+    list.map(async (a) => {
+      await regenerateMessage(a, { keepEdited: true });
+      await a.save();
+    }),
+  );
+}
+
+/**
+ * Modèle de message ou questionnaire modifié : tous les messages pas encore envoyés suivent
+ * immédiatement (sauf ceux retouchés à la main pour une mission précise).
+ */
+export async function regenerateAllPending(type?: 'pre' | 'post'): Promise<number> {
+  const list = await CallAssignment.find({ status: { $in: ['planned', 'notified'] }, ...(type ? { type } : {}) });
+  let n = 0;
+  for (let i = 0; i < list.length; i += 10) {
+    await Promise.all(
+      list.slice(i, i + 10).map(async (a) => {
+        const before = a.message?.text;
+        await regenerateMessage(a, { keepEdited: true });
+        if (a.message?.text !== before) n++;
+        await a.save();
+      }),
+    );
+  }
+  return n;
 }

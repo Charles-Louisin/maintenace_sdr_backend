@@ -3,7 +3,7 @@ import multer from 'multer';
 import { Types } from 'mongoose';
 import { ah, param, qstr } from '../../lib/http.js';
 import { notFound } from '../../lib/errors.js';
-import { Venue } from '../../models/registry.js';
+import { Venue, Volunteer, ResponsibleContact } from '../../models/registry.js';
 import { OwnerAccount } from '../../models/owner.js';
 import { Settings } from '../../models/config.js';
 import { getFile } from '../documents/storage.service.js';
@@ -49,10 +49,16 @@ imagesRouter.get(
   ah(async (req, res) => {
     const kind = String(req.params.kind);
     const id = String(req.params.id);
-    if (!Types.ObjectId.isValid(id) || !['venue', 'avatar'].includes(kind)) throw notFound('Image');
+    if (!Types.ObjectId.isValid(id) || !['venue', 'avatar', 'volunteer', 'contact'].includes(kind)) throw notFound('Image');
     verifyImage(kind, id, qstr(req, 'v') ?? '', qstr(req, 'exp') ?? '', qstr(req, 'sig') ?? '');
     const doc =
-      kind === 'venue' ? await Venue.findById(id).select('image').lean() : await OwnerAccount.findById(id).select('avatar').lean();
+      kind === 'venue'
+        ? await Venue.findById(id).select('image').lean()
+        : kind === 'volunteer'
+          ? await Volunteer.findById(id).select('image').lean()
+          : kind === 'contact'
+            ? await ResponsibleContact.findById(id).select('image').lean()
+            : await OwnerAccount.findById(id).select('avatar').lean();
     const img = doc ? ((doc as { image?: StoredImage; avatar?: StoredImage }).image ?? (doc as { avatar?: StoredImage }).avatar) : null;
     await sendImage(res, img, 'private, max-age=604800, immutable');
   }),
@@ -102,6 +108,37 @@ imageUploadRouter.delete(
     res.json({ imageUrl: null });
   }),
 );
+
+/** Photo de profil d'un volontaire ou d'un responsable. */
+for (const [segment, kind, Model, label] of [
+  ['volunteers', 'volunteer', Volunteer, 'Volontaire'],
+  ['contacts', 'contact', ResponsibleContact, 'Responsable'],
+] as const) {
+  imageUploadRouter.post(
+    `/${segment}/:id`,
+    uploadImage,
+    ah(async (req, res) => {
+      const M = Model as unknown as typeof Volunteer;
+      const doc = await M.findById(param(req, 'id'));
+      if (!doc) throw notFound(label);
+      const id = String(doc._id);
+      const img = await replaceImage(req, async (x) => void (await M.updateOne({ _id: id }, { image: x })), (doc.get('image') as StoredImage | null) ?? null);
+      await audit('update', kind, doc._id, { image: true });
+      res.json({ imageUrl: signImage(kind, id, img) });
+    }),
+  );
+  imageUploadRouter.delete(
+    `/${segment}/:id`,
+    ah(async (req, res) => {
+      const M = Model as unknown as typeof Volunteer;
+      const doc = await M.findById(param(req, 'id'));
+      if (!doc) throw notFound(label);
+      await removeImage(doc.get('image') as StoredImage | null);
+      await M.updateOne({ _id: doc._id }, { image: null });
+      res.json({ imageUrl: null });
+    }),
+  );
+}
 
 imageUploadRouter.post(
   '/avatar',

@@ -2,7 +2,7 @@ import { DateTime } from 'luxon';
 import { CallAssignment, WorkEvent } from '../../models/work.js';
 import { Venue } from '../../models/registry.js';
 import { getSettings } from '../settings/settings.service.js';
-import { scheduleJob } from './notifications.service.js';
+import { NotificationJob } from '../../models/system.js';
 import { formatDateFr } from '../../lib/dates.js';
 
 /** Missions qui restent à traiter tant qu'elles ne sont pas explicitement terminées. */
@@ -20,6 +20,12 @@ let lastRun = 0;
 export async function ensureOverdueReminders(now = new Date(), opts: { force?: boolean } = {}): Promise<number> {
   if (!opts.force && Date.now() - lastRun < 60_000) return 0;
   lastRun = Date.now();
+  // Rappels encore programmés pour une mission déjà accomplie ou annulée (anciennes données) : arrêtés
+  const pendingFor = await NotificationJob.distinct('callAssignmentId', { status: { $in: ['scheduled', 'failed'] }, callAssignmentId: { $ne: null } });
+  if (pendingFor.length) {
+    const closed = await CallAssignment.find({ _id: { $in: pendingFor }, status: { $in: ['completed', 'cancelled'] } }).distinct('_id');
+    if (closed.length) await NotificationJob.updateMany({ callAssignmentId: { $in: closed }, status: { $in: ['scheduled', 'failed'] } }, { $set: { status: 'cancelled' } });
+  }
   const s = await getSettings();
   const horizon = DateTime.fromJSDate(now).plus({ days: HORIZON_DAYS }).toJSDate();
   const open = await CallAssignment.find({ status: { $in: OPEN_STATUSES }, dueAt: { $lt: horizon } })
@@ -35,7 +41,8 @@ export async function ensureOverdueReminders(now = new Date(), opts: { force?: b
     .lean();
   const venueName = new Map(venues.map((v) => [String(v._id), v.name]));
 
-  let created = 0;
+  // Rappels voulus, calculés en mémoire puis écrits en une seule opération groupée
+  const wanted: { kind: 'overdue_mission'; dedupKey: string; dueAt: Date; title: string; body: string; url: string; workEventId: unknown; callAssignmentId: unknown }[] = [];
   for (const a of open) {
     const e = eventById.get(String(a.workEventId));
     if (!e) continue;
@@ -47,7 +54,7 @@ export async function ensureOverdueReminders(now = new Date(), opts: { force?: b
       const atDate = at.toJSDate();
       if (atDate <= now) continue;
       if (atDate > horizon) break;
-      await scheduleJob({
+      wanted.push({
         kind: 'overdue_mission',
         dedupKey: `overdue:${a._id}:${at.toISODate()}`,
         dueAt: atDate,
@@ -57,8 +64,22 @@ export async function ensureOverdueReminders(now = new Date(), opts: { force?: b
         workEventId: e._id,
         callAssignmentId: a._id,
       });
-      created++;
     }
   }
+  if (!wanted.length) return 0;
+  const existing = await NotificationJob.find({ dedupKey: { $in: wanted.map((w) => w.dedupKey) } })
+    .select('dedupKey status title body')
+    .lean();
+  const byKey = new Map(existing.map((x) => [x.dedupKey, x]));
+  const ops: Parameters<typeof NotificationJob.bulkWrite>[0] = [];
+  for (const w of wanted) {
+    const x = byKey.get(w.dedupKey);
+    if (!x) ops.push({ insertOne: { document: { ...w, status: 'scheduled' } as never } });
+    else if (x.status === 'cancelled' || x.status === 'failed' || (x.status === 'scheduled' && (x.title !== w.title || x.body !== w.body))) {
+      ops.push({ updateOne: { filter: { _id: x._id }, update: { $set: { ...w, status: 'scheduled', attempts: 0, lastError: '' } as never } } });
+    }
+  }
+  if (ops.length) await NotificationJob.bulkWrite(ops, { ordered: false }).catch(() => undefined);
+  const created = ops.length;
   return created;
 }

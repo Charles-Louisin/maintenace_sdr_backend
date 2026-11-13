@@ -6,6 +6,7 @@ import { TaskCatalogEntry } from '../../models/documents.js';
 import { notFound } from '../../lib/errors.js';
 import { audit } from '../audit/audit.service.js';
 import { invalidateQuestionnaires } from './questions.service.js';
+import { regenerateAllPending } from '../call-assignments/call-assignments.service.js';
 import { normKey } from '../../lib/text.js';
 import { param } from '../../lib/http.js';
 
@@ -47,7 +48,9 @@ questionnairesRouter.put(
     );
     invalidateQuestionnaires();
     await audit('update', 'questionnaire', q._id, { count: body.questions.length });
-    res.json(q);
+    // Les questions apparaissent dans les messages pas encore envoyés : mises à jour immédiatement
+    const regenerated = await regenerateAllPending(kind);
+    res.json({ ...q.toObject(), regenerated });
   }),
 );
 

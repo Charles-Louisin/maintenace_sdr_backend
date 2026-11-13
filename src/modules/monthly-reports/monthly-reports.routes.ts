@@ -216,3 +216,16 @@ monthlyReportsRouter.get(
     res.json({ url: signDownload('report', id), expiresInSeconds: 600 });
   }),
 );
+
+/** Suppression d'un rapport généré (fichier compris). Le modèle et les bilans ne sont pas touchés. */
+monthlyReportsRouter.delete(
+  '/monthly/:id',
+  ah(async (req, res) => {
+    const r = await MonthlyReport.findById(param(req, 'id'));
+    if (!r) throw notFound('Rapport');
+    await deleteFile(r.storage as { driver?: string; key?: string }).catch(() => undefined);
+    await r.deleteOne();
+    await audit('delete', 'monthly_report', r._id);
+    res.status(204).end();
+  }),
+);

@@ -5,6 +5,7 @@ import { getSettings, invalidateSettings } from './settings.service.js';
 import { DEFAULT_POST_TEMPLATE, DEFAULT_PRE_TEMPLATE, REPORT_FIELDS } from './defaults.js';
 import { audit } from '../audit/audit.service.js';
 import { rescheduleAllFuture } from '../scheduling/scheduling.service.js';
+import { regenerateAllPending } from '../call-assignments/call-assignments.service.js';
 import { env } from '../../config/env.js';
 import { DateTime } from 'luxon';
 
@@ -64,6 +65,9 @@ settingsRouter.patch(
     await audit('settings_update', 'settings', s._id, body);
     let rescheduled = 0;
     if (timingChanged) rescheduled = await rescheduleAllFuture();
-    res.json({ ok: true, rescheduled });
+    // Nouveau modèle : les messages pas encore envoyés suivent tout de suite
+    let regenerated = 0;
+    if (body.messageTemplates) regenerated = await regenerateAllPending();
+    res.json({ ok: true, rescheduled, regenerated });
   }),
 );

@@ -48,8 +48,10 @@ describe('Authentification du propriétaire unique', () => {
   it('refuse l’accès sans jeton', async () => {
     await request(app).get('/api/venues').expect(401);
   });
-  it('n’expose aucune inscription publique', async () => {
-    await request(app).post('/api/auth/register').send({}).expect(401);
+  it('ferme l’inscription dès qu’un compte vérifié existe', async () => {
+    const st = await request(app).get('/api/auth/setup').expect(200);
+    expect(st.body.registrationOpen).toBe(false);
+    await request(app).post('/api/auth/register').send({ email: 'x@example.test', displayName: 'Intrus', password: 'MotDePasse2026' }).expect(409);
     await request(app).post('/api/auth/signup').send({ email: 'x@y.z', password: 'abc' }).expect(401);
   });
   it('refuse un second compte propriétaire', async () => {
@@ -325,10 +327,20 @@ describe('Parcours complet', () => {
     expect(done!.completionOutcome).toBe('not_done');
     jobs = await mods.models.NotificationJob.find({ callAssignmentId: post!._id, kind: 'overdue_mission', status: 'scheduled' }).lean();
     expect(jobs.length).toBe(0);
+    // Bilan vide enregistré, intervention « bilan reçu », tâches non réalisées
+    const empty = await mods.models.IncomingReport.findOne({ callAssignmentId: post!._id, autoEmpty: true }).lean();
+    expect(empty?.status).toBe('validated');
+    let ev = await mods.models.WorkEvent.findById(eventIds[0]).lean();
+    expect(ev!.status).toBe('done');
+    expect(ev!.tasks.every((t) => t.outcome === 'not_done')).toBe(true);
     const finished = await request(app).get('/api/call-assignments?scope=done').set(auth()).expect(200);
     expect(finished.body.some((x: { _id: string }) => x._id === String(post!._id))).toBe(true);
     // Retour à l’état initial pour la suite du parcours
     await request(app).post(`/api/call-assignments/${post!._id}/reopen`).set(auth()).expect(200);
+    // Rouverte : la mention « bilan reçu » disparaît, le bilan vide aussi
+    ev = await mods.models.WorkEvent.findById(eventIds[0]).lean();
+    expect(ev!.status).toBe('scheduled');
+    expect(await mods.models.IncomingReport.exists({ callAssignmentId: post!._id, autoEmpty: true })).toBeNull();
     await mods.models.CallAssignment.updateOne({ _id: post!._id }, { dueAt: originalDue, status: 'planned' });
     await mods.models.NotificationJob.updateMany({ callAssignmentId: post!._id, kind: 'overdue_mission' }, { status: 'cancelled' });
   });
@@ -492,7 +504,7 @@ describe('Parcours complet', () => {
     expect(xml).toContain('Alpha Nord');
     expect(xml).toContain('Fuite au plafond des toilettes');
     expect(xml).toContain('Réparation prévue la semaine prochaine');
-    expect(xml).toContain('Non renseigné');
+    expect(xml).not.toContain('Non renseigné'); // information absente ou à vérifier : case vide
     expect(xml).not.toContain('Problème exemple'); // ligne d'exemple du modèle retirée
     expect(xml).toContain('Grilledutableau'); // style du tableau conservé
     expect(xml).toContain('w:orient="landscape"'); // mise en page conservée
@@ -602,26 +614,25 @@ describe('Parcours complet', () => {
     expect(left).toHaveLength(0);
   });
 
-  it('gère les programmes « semaine du » : jour demandé, suivi le dimanche soir ou le soir du jour donné', async () => {
+  it('gère les programmes « semaine du » : jour demandé, suivi le lendemain de la semaine ou selon le jour donné', async () => {
     const e = await mods.models.WorkEvent.findOne({ status: 'scheduled', date: { $gte: new Date().toISOString().slice(0, 10) } }).sort({ date: 1 }).lean();
     await request(app).patch(`/api/venues/${e!.venueId}`).set(auth()).send({ weeklySchedule: true }).expect(200);
-    const { weekBounds } = await import('../src/lib/dates.js');
+    const { weekBounds, addDaysIso } = await import('../src/lib/dates.js');
     const { end } = weekBounds(e!.date);
     let post = await mods.models.CallAssignment.findOne({ workEventId: e!._id, type: 'post' }).lean();
     const pre = await mods.models.CallAssignment.findOne({ workEventId: e!._id, type: 'pre' }).lean();
-    // Dimanche de la semaine, 19 h à Douala (UTC+1)
-    expect(post!.dueAt.toISOString()).toBe(`${end}T18:00:00.000Z`);
+    // Sans jour donné : lendemain de la fin de semaine, 8 h à Douala (UTC+1)
+    expect(post!.dueAt.toISOString()).toBe(`${addDaysIso(end, 1)}T07:00:00.000Z`);
     if (['planned', 'notified'].includes(pre!.status)) {
       expect(pre!.message!.text).toContain('semaine du');
       expect(pre!.message!.text).toContain('quel jour');
       expect(pre!.message!.text).toContain('nettoyage hebdomadaire');
     }
-    // Jour donné : suivi le soir même ; report possible dans la semaine seulement
-    const { addDaysIso } = await import('../src/lib/dates.js');
+    // Jour donné : suivi calculé sur ce jour (réglage habituel : lendemain matin) ; report possible dans la semaine seulement
     const day = addDaysIso(e!.date, 2);
     await request(app).patch(`/api/work-events/${e!._id}/planned-day`).set(auth()).send({ plannedDay: day }).expect(200);
     post = await mods.models.CallAssignment.findOne({ workEventId: e!._id, type: 'post' }).lean();
-    expect(post!.dueAt.toISOString()).toBe(`${day}T18:00:00.000Z`);
+    expect(post!.dueAt.toISOString()).toBe(`${addDaysIso(day, 1)}T07:00:00.000Z`);
     await request(app).patch(`/api/work-events/${e!._id}/planned-day`).set(auth()).send({ plannedDay: addDaysIso(end, 1) }).expect(400);
     // Retour à l’état initial
     await request(app).patch(`/api/work-events/${e!._id}/planned-day`).set(auth()).send({ plannedDay: null }).expect(200);

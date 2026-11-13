@@ -8,8 +8,20 @@ const ownerSchema = new Schema(
     displayName: { type: String, required: true, trim: true },
     phone: { type: String, default: '' },
     passwordHash: { type: String, required: true },
-    /** Hash Argon2id du code de récupération (affiché une seule fois à la création). */
-    recoveryCodeHash: { type: String, required: true },
+    /** Ancien code de récupération (remplacé par les codes envoyés par e-mail). */
+    recoveryCodeHash: { type: String, default: '' },
+    /** false tant que l’adresse n’est pas confirmée par le code reçu (absent = compte créé avant la vérification) */
+    emailVerified: { type: Boolean },
+    /** Nouvelle adresse en attente de confirmation */
+    pendingEmail: { type: String, default: '' },
+    /** Code à 6 chiffres en cours (haché), un seul à la fois */
+    emailCode: {
+      type: new Schema(
+        { purpose: String, email: String, codeHash: String, expiresAt: Date, sentAt: Date, attempts: { type: Number, default: 0 } },
+        { _id: false },
+      ),
+      default: null,
+    },
     failedLogins: { type: Number, default: 0 },
     lockedUntil: { type: Date, default: null },
     refreshTokens: [

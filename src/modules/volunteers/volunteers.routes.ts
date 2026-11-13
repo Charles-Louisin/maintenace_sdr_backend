@@ -9,7 +9,10 @@ import { normalizePhone } from '../../lib/phone.js';
 import { notFound, badRequest } from '../../lib/errors.js';
 import { audit } from '../audit/audit.service.js';
 import { getSettings } from '../settings/settings.service.js';
-import { reassignFutureOf, rebalanceFuture } from '../call-assignments/call-assignments.service.js';
+import { reassignFutureOf, rebalanceFuture, refreshMessagesOf } from '../call-assignments/call-assignments.service.js';
+import { signImage, type StoredImage } from '../images/images.service.js';
+
+const withImage = <T extends { _id: unknown; image?: unknown }>({ image, ...v }: T) => ({ ...v, imageUrl: signImage('volunteer', String(v._id), image as StoredImage | null) });
 
 export const volunteersRouter = Router();
 
@@ -17,6 +20,7 @@ const input = z.object({
   fullName: z.string().min(1).max(160),
   whatsapp: z.string().min(6).max(30),
   active: z.boolean().optional(),
+  gender: z.enum(['M', 'F']).optional(),
   skills: z.array(z.string().max(80)).max(20).optional(),
   notes: z.string().max(4000).optional(),
   weeklyAvailability: z
@@ -60,13 +64,12 @@ volunteersRouter.get(
   '/',
   ah(async (_req, res) => {
     const list = await Volunteer.find({ deletedAt: null }).sort({ active: -1, fullName: 1 }).lean();
-    const stats = await statsFor(list.map((v) => String(v._id)));
-    const s = await getSettings();
+    const [stats, s] = await Promise.all([statsFor(list.map((v) => String(v._id))), getSettings()]);
     res.json(
       list.map((v) => {
         const st = stats.get(String(v._id));
         return {
-          ...v,
+          ...withImage(v),
           stats: {
             totalMissions: st?.total ?? 0,
             monthMissions: st?.month ?? 0,
@@ -89,7 +92,7 @@ volunteersRouter.post(
     await audit('create', 'volunteer', v._id);
     // Le nouveau volontaire prend sa part des missions à venir
     const balance = await rebalanceFuture();
-    res.status(201).json({ ...v.toObject(), rebalanced: balance.filled + balance.moved });
+    res.status(201).json({ ...withImage(v.toObject()), rebalanced: balance.filled + balance.moved });
   }),
 );
 
@@ -98,13 +101,16 @@ volunteersRouter.get(
   ah(async (req, res) => {
     const v = await Volunteer.findOne({ _id: param(req, 'id'), deletedAt: null }).lean();
     if (!v) throw notFound('Volontaire');
-    const missions = await CallAssignment.find({ volunteerId: v._id })
-      .sort({ dueAt: -1 })
-      .limit(200)
-      .populate({ path: 'workEventId', select: 'date congregationName venueId status', populate: { path: 'venueId', select: 'name' } })
-      .lean();
-    const stats = (await statsFor([String(v._id)])).get(String(v._id));
-    res.json({ ...v, missions, stats });
+    const [missions, statsMap] = await Promise.all([
+      CallAssignment.find({ volunteerId: v._id })
+        .sort({ dueAt: -1 })
+        .limit(200)
+        .select('type status dueAt workEventId completionOutcome')
+        .populate({ path: 'workEventId', select: 'date congregationName venueId status', populate: { path: 'venueId', select: 'name' } })
+        .lean(),
+      statsFor([String(v._id)]),
+    ]);
+    res.json({ ...withImage(v), missions, stats: statsMap.get(String(v._id)) });
   }),
 );
 
@@ -117,6 +123,8 @@ volunteersRouter.patch(
     const v = await Volunteer.findOneAndUpdate({ _id: param(req, 'id'), deletedAt: null }, update, { returnDocument: 'after', runValidators: true });
     if (!v) throw notFound('Volontaire');
     await audit('update', 'volunteer', v._id, { fields: Object.keys(body) });
+    // Nom ou titre (frère / sœur) changés : messages pas encore envoyés mis à jour
+    if (body.fullName || body.gender) await refreshMessagesOf(String(v._id));
     let reassigned = 0;
     if (body.active === false || body.unavailabilities || body.weeklyAvailability) reassigned = await reassignFutureOf(String(v._id));
     // Réactivé ou plus disponible : il reprend sa part, et les missions sans volontaire sont pourvues
@@ -124,7 +132,7 @@ volunteersRouter.patch(
       const balance = await rebalanceFuture();
       reassigned += balance.filled + balance.moved;
     }
-    res.json({ volunteer: v, reassigned });
+    res.json({ volunteer: withImage(v.toObject()), reassigned });
   }),
 );
 

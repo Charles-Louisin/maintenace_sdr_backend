@@ -20,7 +20,7 @@ API de l’application **BATIS** (suivi de la maintenance des Salles du Royaume)
 ```bash
 npm install
 cp .env.example .env        # renseigner les valeurs (aucun secret dans .env.example)
-npm run owner:create        # crée le compte unique et affiche UNE fois le code de récupération
+npm run owner:create        # (facultatif) crée le compte unique sans passer par l’inscription de l’application
 ```
 
 Variables essentielles : `MONGODB_URI`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `DOWNLOAD_URL_SECRET` (32+ caractères), `UPLOADTHING_TOKEN`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `PUBLIC_BASE_URL` (URL HTTPS publique en production).
@@ -93,6 +93,6 @@ Non couvert automatiquement : appels réels à OpenRouter, UploadThing et Expo P
 
 ## Sécurité
 
-- Aucune inscription publique ; verrouillage 15 min après 5 échecs ; mot de passe oublié via le code de récupération.
+- Un seul compte : inscription ouverte tant qu’aucun compte vérifié n’existe ; adresse vérifiée par un code à 6 chiffres envoyé par Resend (10 min, 5 essais) ; mot de passe oublié par code e-mail ; verrouillage 15 min après 5 échecs.
 - Contenus importés et messages traités comme données non fiables ; clés IA uniquement côté serveur ; journaux sans données sensibles.
 - Activer les sauvegardes automatiques MongoDB Atlas.

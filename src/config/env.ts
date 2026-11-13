@@ -25,6 +25,10 @@ const schema = z.object({
     .default('true')
     .transform((v) => v !== 'false'),
   EXPO_ACCESS_TOKEN: z.string().optional().default(''),
+  /** E-mails (codes de vérification et de réinitialisation) envoyés par Resend */
+  RESEND_API_KEY: z.string().optional().default(''),
+  RESEND_FROM_EMAIL: z.string().default('onboarding@resend.dev'),
+  RESEND_REPLY_TO: z.string().optional().default(''),
 });
 
 const parsed = schema.safeParse(process.env);

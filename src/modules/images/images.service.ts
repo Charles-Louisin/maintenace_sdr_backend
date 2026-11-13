@@ -29,7 +29,7 @@ export async function removeImage(previous?: Partial<StoredImage> | null) {
   if (previous?.key) await deleteFile(previous).catch(() => undefined);
 }
 
-export type ImageKind = 'venue' | 'avatar';
+export type ImageKind = 'venue' | 'avatar' | 'volunteer' | 'contact';
 
 /**
  * Lien signé longue durée (30 jours, arrondi au jour pour rester identique d'un écran à l'autre
